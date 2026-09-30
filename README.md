@@ -45,6 +45,7 @@ Details, keyboard shortcuts and troubleshooting: **[docs/RUNNING.md](docs/RUNNIN
 | `src/main.c` | The window: controls, menus, layout, file dialogs, drag and drop. |
 | `src/player.c` | Playback through the Windows `waveOut` API, on a worker thread. |
 | `src/volume.c` | The software volume: the slider-to-loudness curve and sample scaling. |
+| `src/glyph.c` | Draws the Previous/Play/Pause/Stop/Next symbols, for the buttons and the Playback menu, at whatever size the window's scaling needs. |
 | `src/decoder.c` | One interface over the MP3, FLAC and WAV decoders. |
 | `src/tags.c` | Reads title and artist: ID3v2.2/2.3/2.4, ID3v1, FLAC Vorbis comments, WAV `LIST/INFO` and `id3 ` chunks. |
 | `src/playlist.c` | The track list, Previous/Next logic, and M3U/M3U8/PLS reading and writing. |

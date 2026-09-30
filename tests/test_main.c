@@ -68,6 +68,7 @@ static const Suite suites[] = {
 	{ "decoder", suite_decoder },
 	{ "player", suite_player },
 	{ "volume", suite_volume },
+	{ "glyph", suite_glyph },
 };
 
 #define SUITE_COUNT (sizeof(suites) / sizeof(suites[0]))

@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include "decoder.h"
+#include "glyph.h"
 #include "player.h"
 #include "playlist.h"
 #include "resource.h"
@@ -60,6 +61,11 @@ typedef struct {
 	HWND vol_label, vol_bar;
 	HWND btn_prev, btn_play, btn_stop, btn_next, btn_add, btn_playlist;
 	HFONT font, title_font, bold_font;
+	HICON icons[MP_GLYPH_COUNT]; /* the playback buttons' symbols */
+	int icon_size;
+	/* The same symbols for the Playback menu. All NULL on Windows XP, which
+	 * shows that menu as text only (see create_menu_bitmaps). */
+	HBITMAP menu_bitmaps[MP_GLYPH_COUNT];
 	HACCEL accel;
 	int unit;       /* message font line height in pixels */
 	int title_height;
@@ -178,11 +184,20 @@ static int add_playlist_file(const wchar_t *path)
 
 /* ---- Now playing -------------------------------------------------------- */
 
+static void set_menu_bitmap(UINT id, HBITMAP bmp);
+
 static void update_play_button(int force)
 {
 	MpPlayerState state = mp_player_state(g.player);
 	if (force || (state == MP_PLAYER_PLAYING) != (g.shown_state == MP_PLAYER_PLAYING)) {
-		SetWindowTextW(g.btn_play, state == MP_PLAYER_PLAYING ? L"Pause" : L"Play");
+		int playing = state == MP_PLAYER_PLAYING;
+		SetWindowTextW(g.btn_play, playing ? L"Pause" : L"Play");
+		/* The symbol says what pressing the button will do, like the text. */
+		SendMessageW(g.btn_play, BM_SETIMAGE, IMAGE_ICON,
+			(LPARAM)g.icons[playing ? MP_GLYPH_PAUSE : MP_GLYPH_PLAY]);
+		/* The menu item is always called "Play/Pause", but its symbol
+		 * follows the button's, so the two never disagree. */
+		set_menu_bitmap(IDM_PLAY_PAUSE, g.menu_bitmaps[playing ? MP_GLYPH_PAUSE : MP_GLYPH_PLAY]);
 		g.shown_state = state;
 	}
 }
@@ -672,6 +687,13 @@ static int button_width(const wchar_t *longest_text)
 	return w < g.unit * 5 ? g.unit * 5 : w;
 }
 
+/* The same for a button with a symbol: room for the icon and the space the
+ * button control leaves between it and the text. */
+static int icon_button_width(const wchar_t *longest_text)
+{
+	return button_width(longest_text) + g.icon_size + g.unit / 2;
+}
+
 /* The volume label is sized for its widest text, so it does not resize (and
  * shift the seek bar) as the numbers change. */
 static int volume_label_width(void)
@@ -695,8 +717,8 @@ static void layout(void)
 	RECT rc, sr;
 	int m = g.unit * 2 / 3, gap = g.unit / 2;
 	int x, y, w, h, status_h, btn_h, time_w, vl_w, vb_w, seek_w;
-	int wp = button_width(L"Previous"), wplay = button_width(L"Pause");
-	int ws = button_width(L"Stop"), wn = button_width(L"Next");
+	int wp = icon_button_width(L"Previous"), wplay = icon_button_width(L"Pause");
+	int ws = icon_button_width(L"Stop"), wn = icon_button_width(L"Next");
 	int wa = button_width(L"Add Files..."), wl = button_width(L"Open Playlist...");
 
 	GetClientRect(g.hwnd, &rc);
@@ -745,8 +767,8 @@ static void layout(void)
 static int min_client_width(void)
 {
 	int gap = g.unit / 2, margins = g.unit * 4 / 3;
-	int buttons = button_width(L"Previous") + button_width(L"Pause") + button_width(L"Stop") +
-		button_width(L"Next") + button_width(L"Add Files...") +
+	int buttons = icon_button_width(L"Previous") + icon_button_width(L"Pause") +
+		icon_button_width(L"Stop") + icon_button_width(L"Next") + button_width(L"Add Files...") +
 		button_width(L"Open Playlist...") + 5 * gap + g.unit * 2;
 	/* The seek row must also fit, with a seek bar still wide enough to use.
 	 * The button row is normally the wider, but that depends on the font. */
@@ -796,6 +818,178 @@ static void create_fonts(void)
 	g.title_font = CreateFontIndirectW(&lf);
 }
 
+/* Renders one symbol into a new 32-bit top-down DIB section, with straight
+ * or premultiplied alpha. Returns NULL on failure. */
+static HBITMAP make_glyph_bitmap(MpGlyph glyph, int size, COLORREF color, int premultiplied)
+{
+	BITMAPINFO bi;
+	void *bits = NULL;
+	HBITMAP bmp;
+	/* COLORREF is 0x00BBGGRR; the glyph wants 0x00RRGGBB. */
+	uint32_t rgb = ((uint32_t)GetRValue(color) << 16) | ((uint32_t)GetGValue(color) << 8) | GetBValue(color);
+
+	memset(&bi, 0, sizeof(bi));
+	bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+	bi.bmiHeader.biWidth = size;
+	bi.bmiHeader.biHeight = -size; /* negative = top row first, as rendered */
+	bi.bmiHeader.biPlanes = 1;
+	bi.bmiHeader.biBitCount = 32;
+	bi.bmiHeader.biCompression = BI_RGB;
+	bmp = CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+	if (bmp == NULL || bits == NULL)
+		return NULL;
+	/* The DIB's rows are exactly size * 4 bytes (32-bit rows need no
+	 * padding), so the glyph renders straight into it. */
+	if (!mp_glyph_render(glyph, size, rgb, (uint32_t *)bits)) {
+		DeleteObject(bmp);
+		return NULL;
+	}
+	if (premultiplied)
+		mp_glyph_premultiply((uint32_t *)bits, (size_t)size * size);
+	return bmp;
+}
+
+/* Builds one symbol as a 32-bit alpha icon. 32-bit icons with an alpha
+ * channel work from XP on; the monochrome mask is still required by
+ * CreateIconIndirect but is ignored when the color bitmap has alpha, so it
+ * is left all zeros (all "opaque"). */
+static HICON make_glyph_icon(MpGlyph glyph, int size, COLORREF color)
+{
+	uint8_t *mask_bits;
+	HBITMAP color_bmp, mask_bmp = NULL;
+	ICONINFO ii;
+	HICON icon = NULL;
+
+	color_bmp = make_glyph_bitmap(glyph, size, color, 0);
+	/* Monochrome bitmap rows are padded to 16 bits. */
+	mask_bits = (uint8_t *)calloc((size_t)((size + 15) / 16) * 2 * size, 1);
+	if (mask_bits != NULL)
+		mask_bmp = CreateBitmap(size, size, 1, 1, mask_bits);
+	if (color_bmp != NULL && mask_bmp != NULL) {
+		memset(&ii, 0, sizeof(ii));
+		ii.fIcon = TRUE;
+		ii.hbmColor = color_bmp;
+		ii.hbmMask = mask_bmp;
+		/* The icon gets its own copies, so the bitmaps are freed below. */
+		icon = CreateIconIndirect(&ii);
+	}
+	if (color_bmp != NULL)
+		DeleteObject(color_bmp);
+	if (mask_bmp != NULL)
+		DeleteObject(mask_bmp);
+	free(mask_bits);
+	return icon;
+}
+
+/* Puts a bitmap beside a menu item (NULL removes it). */
+static void set_menu_bitmap(UINT id, HBITMAP bmp)
+{
+	MENUITEMINFOW mii;
+	HMENU menu = GetMenu(g.hwnd);
+	if (menu == NULL)
+		return;
+	memset(&mii, 0, sizeof(mii));
+	mii.cbSize = sizeof(mii);
+	mii.fMask = MIIM_BITMAP;
+	mii.hbmpItem = bmp;
+	SetMenuItemInfoW(menu, id, FALSE, &mii);
+}
+
+/*
+ * (Re)creates the Playback menu's symbols in the current menu text color.
+ *
+ * Only on Windows Vista and later. Their menus draw an item's bitmap with
+ * AlphaBlend, so a premultiplied 32-bit bitmap gets smooth, transparent
+ * edges on the menu's own background. Windows XP ignores the alpha channel
+ * there and would draw each symbol on a black square. XP's alternative is
+ * to owner-draw the bitmaps (HBMMENU_CALLBACK), but that cannot be tried
+ * without an XP machine, and on Vista and later it would switch the menu
+ * out of the visual style. So on XP the menu simply stays text only, as it
+ * always was. GetVersion is used rather than GetVersionEx because only the
+ * major version matters, and it needs no manifest entry to report it: every
+ * version the manifest does not list still reports 6 or more.
+ */
+static void create_menu_bitmaps(void)
+{
+	HBITMAP old[MP_GLYPH_COUNT];
+	COLORREF color = GetSysColor(COLOR_MENUTEXT);
+	int i, size = GetSystemMetrics(SM_CXSMICON);
+	if (LOBYTE(LOWORD(GetVersion())) < 6)
+		return;
+	/* The small-icon size (16 px at 100%, 24 at 150%) is what menus leave
+	 * room for; at 16 px each design-grid unit is exactly one pixel. */
+	for (i = 0; i < MP_GLYPH_COUNT; i++) {
+		old[i] = g.menu_bitmaps[i];
+		g.menu_bitmaps[i] = make_glyph_bitmap((MpGlyph)i, size, color, 1);
+	}
+	set_menu_bitmap(IDM_PREVIOUS, g.menu_bitmaps[MP_GLYPH_PREVIOUS]);
+	set_menu_bitmap(IDM_STOP, g.menu_bitmaps[MP_GLYPH_STOP]);
+	set_menu_bitmap(IDM_NEXT, g.menu_bitmaps[MP_GLYPH_NEXT]);
+	set_menu_bitmap(IDM_PLAY_PAUSE,
+		g.menu_bitmaps[g.shown_state == MP_PLAYER_PLAYING ? MP_GLYPH_PAUSE : MP_GLYPH_PLAY]);
+	/* Menus do not own their item bitmaps either. */
+	for (i = 0; i < MP_GLYPH_COUNT; i++) {
+		if (old[i] != NULL)
+			DeleteObject(old[i]);
+	}
+}
+
+static void destroy_menu_bitmaps(void)
+{
+	int i;
+	for (i = 0; i < MP_GLYPH_COUNT; i++) {
+		if (g.menu_bitmaps[i] != NULL)
+			DeleteObject(g.menu_bitmaps[i]);
+		g.menu_bitmaps[i] = NULL;
+	}
+}
+
+/*
+ * (Re)creates the playback buttons' symbols in the current button text
+ * color and puts them on the buttons. Called at startup and again when the
+ * system colors change (switching to or from high contrast, say), so the
+ * symbols always match the captions beside them.
+ */
+static void create_button_icons(void)
+{
+	HICON old[MP_GLYPH_COUNT];
+	COLORREF color = GetSysColor(COLOR_BTNTEXT);
+	int i;
+	/* A little under the text height, like the icons on system buttons.
+	 * Never below 8 px, where the shapes would stop being readable. */
+	g.icon_size = g.unit - g.unit / 8;
+	if (g.icon_size < 8)
+		g.icon_size = 8;
+	for (i = 0; i < MP_GLYPH_COUNT; i++) {
+		old[i] = g.icons[i];
+		g.icons[i] = make_glyph_icon((MpGlyph)i, g.icon_size, color);
+	}
+	/* BM_SETIMAGE on a button that keeps its text shows both, icon on the
+	 * left (Common Controls 6, which the manifest asks for). A NULL icon,
+	 * if creation failed, just leaves the text. */
+	SendMessageW(g.btn_prev, BM_SETIMAGE, IMAGE_ICON, (LPARAM)g.icons[MP_GLYPH_PREVIOUS]);
+	SendMessageW(g.btn_stop, BM_SETIMAGE, IMAGE_ICON, (LPARAM)g.icons[MP_GLYPH_STOP]);
+	SendMessageW(g.btn_next, BM_SETIMAGE, IMAGE_ICON, (LPARAM)g.icons[MP_GLYPH_NEXT]);
+	SendMessageW(g.btn_play, BM_SETIMAGE, IMAGE_ICON,
+		(LPARAM)g.icons[g.shown_state == MP_PLAYER_PLAYING ? MP_GLYPH_PAUSE : MP_GLYPH_PLAY]);
+	/* Buttons do not own their images, so the old ones are ours to free,
+	 * but only once nothing shows them any more. */
+	for (i = 0; i < MP_GLYPH_COUNT; i++) {
+		if (old[i] != NULL)
+			DestroyIcon(old[i]);
+	}
+}
+
+static void destroy_button_icons(void)
+{
+	int i;
+	for (i = 0; i < MP_GLYPH_COUNT; i++) {
+		if (g.icons[i] != NULL)
+			DestroyIcon(g.icons[i]);
+		g.icons[i] = NULL;
+	}
+}
+
 static void on_create(HWND hwnd)
 {
 	g.hwnd = hwnd;
@@ -827,6 +1021,9 @@ static void on_create(HWND hwnd)
 	g.btn_next = make_child(L"BUTTON", L"Next", BS_PUSHBUTTON | WS_TABSTOP, 0, IDC_BTN_NEXT);
 	g.btn_add = make_child(L"BUTTON", L"Add Files...", BS_PUSHBUTTON | WS_TABSTOP, 0, IDC_BTN_ADD);
 	g.btn_playlist = make_child(L"BUTTON", L"Open Playlist...", BS_PUSHBUTTON | WS_TABSTOP, 0, IDC_BTN_PLAYLIST);
+	create_button_icons();
+	/* The class's menu is already attached by the time WM_CREATE arrives. */
+	create_menu_bitmaps();
 
 	g.list = make_child(WC_LISTVIEWW, L"",
 		LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS | WS_TABSTOP, WS_EX_CLIENTEDGE, IDC_LIST);
@@ -991,6 +1188,10 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		default: break;
 		}
 		break;
+	case WM_SYSCOLORCHANGE:
+		create_button_icons();
+		create_menu_bitmaps();
+		break;
 	case WM_DESTROY:
 		KillTimer(hwnd, TIMER_POSITION);
 		PostQuitMessage(0);
@@ -1082,7 +1283,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show)
 	 * every DPI. */
 	r.left = 0;
 	r.top = 0;
-	r.right = g.unit * 44;
+	r.right = g.unit * 48;
 	r.bottom = g.unit * 34;
 	AdjustWindowRectEx(&r, WS_OVERLAPPEDWINDOW, TRUE, WS_EX_CONTROLPARENT);
 	SetWindowPos(g.hwnd, NULL, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER);
@@ -1108,5 +1309,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show)
 	DeleteObject(g.font);
 	DeleteObject(g.bold_font);
 	DeleteObject(g.title_font);
+	destroy_button_icons();
+	/* After the window (and with it the menu) is gone, so no menu still
+	 * refers to the bitmaps. */
+	destroy_menu_bitmaps();
 	return (int)msg.wParam;
 }

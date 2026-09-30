@@ -62,6 +62,7 @@ add_library(mpcore STATIC
 	src/decoder.c
 	src/player.c
 	src/volume.c
+	src/glyph.c
 	src/dr_libs_impl.c
 )
 target_include_directories(mpcore PUBLIC
@@ -134,13 +135,14 @@ if(MP_BUILD_TESTS)
 		tests/test_decoder.c
 		tests/test_player.c
 		tests/test_volume.c
+		tests/test_glyph.c
 	)
 	target_include_directories(mp_tests PRIVATE tests)
 	target_link_libraries(mp_tests PRIVATE mpcore user32)
 	mp_executable_settings(mp_tests)
 
 	# One CTest test per suite, so a failure names the area that broke.
-	foreach(suite text tags track playlist decoder player volume)
+	foreach(suite text tags track playlist decoder player volume glyph)
 		add_test(NAME ${suite} COMMAND mp_tests ${suite})
 	endforeach()
 	# Exit code 77 = skipped. The player suite needs a real audio output
