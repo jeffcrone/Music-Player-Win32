@@ -57,4 +57,16 @@ uint32_t mp_player_duration_ms(MpPlayer *p);
 /* Incremented by every successful load. */
 UINT mp_player_generation(MpPlayer *p);
 
+/* Volume, 0 to 100 (out-of-range values are clamped); see volume.h. It
+ * starts at 100, which plays the file's samples unchanged, and it belongs
+ * to the player rather than the track, so it carries over from one load to
+ * the next. Mute is simply a volume of 0.
+ *
+ * A change is heard after the audio already queued to the device has
+ * played: up to about a third of a second. Rewriting queued buffers is not
+ * safe (the driver may be reading them), and resetting the device to
+ * requeue would click and, for MP3, cost a re-seek. */
+void mp_player_set_volume(MpPlayer *p, int percent);
+int mp_player_volume(MpPlayer *p);
+
 #endif

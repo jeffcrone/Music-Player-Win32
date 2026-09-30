@@ -106,6 +106,8 @@ At the top of the window:
   left blank. When a file has an "album artist" but no track artist, the
   album artist is shown.
 - The **seek bar** and **elapsed / total time**.
+- The **volume** slider, labeled with the current level ("Volume 80%"), or
+  "Muted".
 
 The playlist columns show the same title and artist, plus the file name.
 The playing track is shown in **bold**. The window's title bar reads
@@ -135,6 +137,8 @@ The playback shortcuts are the same as Windows Media Player's.
 | Previous track | **Previous** | Playback > Previous | Ctrl+B |
 | Next track | **Next** | Playback > Next | Ctrl+F |
 | Seek | drag the seek bar, or click it | | Tab to the seek bar, then arrow keys (1%) or Page Up/Down (5%) |
+| Volume up / down | drag the volume slider, or click it | Playback > Volume Up / Volume Down | F10 / F9 (5% a press), or Tab to the volume slider, then arrow keys (5%) or Page Up/Down (20%) |
+| Mute / unmute | | Playback > Mute | F8 |
 | Open files (replace) | | File > Open Files... | Ctrl+O |
 | Add files | **Add Files...** | File > Add Files... | Ctrl+Shift+O |
 | Open playlist | **Open Playlist...** | File > Open Playlist... | Ctrl+L |
@@ -153,6 +157,10 @@ How playback moves along:
   stops ("End of playlist"), unless **Playback > Repeat Playlist** is
   checked, in which case it starts again from the top.
 - **Play** with nothing loaded starts the selected track, or the first one.
+- **Volume** starts at 100% every time the player starts, which plays the
+  files exactly as they are. Changing the volume while muted unmutes, at
+  the new level. A change takes up to about a third of a second to be
+  heard, because that much audio is already queued up ahead.
 - When the player moves on by itself, or with Next/Previous, it skips files
   that can't be played (missing, damaged, not really audio) and puts the
   reason in the status bar. Double-clicking such a file just shows the
@@ -171,10 +179,13 @@ few tips:
   Exclusive fullscreen also works, but Alt+Tab is slower.
 - Turn WoW's own **Music** volume down or off (System > Sound) so the two
   don't play over each other. Leave the effects and ambience on.
-- The player has no volume slider of its own. On Windows Vista and later,
-  set its volume separately from the game's in the **Volume Mixer**
-  (right-click the speaker icon on the taskbar). On XP it follows the
-  master volume.
+- Use the player's own **volume slider** (or F9/F10, and F8 to mute) to
+  balance it against the game. It only changes the player's volume, never
+  the game's or Windows', on every Windows version including XP. On Vista
+  and later the **Volume Mixer** (right-click the speaker icon on the
+  taskbar) works too.
+- The keyboard's **volume keys** still change the Windows volume, as they
+  do everywhere else, not the player's.
 - Keyboard media keys go to whichever window is active. While you are in
   the game they go to WoW, not to the player, so switch to the player (or
   use its shortcuts) to change tracks.

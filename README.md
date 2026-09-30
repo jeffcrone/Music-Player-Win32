@@ -11,6 +11,8 @@ Windows program on whatever version of Windows it runs on.
   no title in the metadata it shows the **file name**; with no artist, the
   artist line is left blank.
 - **Play / Pause**, **Stop**, **Previous** and **Next**, plus a seek bar.
+- Its own **volume** slider and **mute**, separate from the game's and
+  Windows' volume.
 - Opens **playlists** (`.m3u`, `.m3u8`, `.pls`) and saves them (`.m3u8`).
 - Runs on **Windows XP SP3 through Windows 11**, 32-bit and 64-bit. A single
   `MusicPlayer.exe`, no installer, no DLLs, nothing written to the registry.
@@ -42,6 +44,7 @@ Details, keyboard shortcuts and troubleshooting: **[docs/RUNNING.md](docs/RUNNIN
 | --- | --- |
 | `src/main.c` | The window: controls, menus, layout, file dialogs, drag and drop. |
 | `src/player.c` | Playback through the Windows `waveOut` API, on a worker thread. |
+| `src/volume.c` | The software volume: the slider-to-loudness curve and sample scaling. |
 | `src/decoder.c` | One interface over the MP3, FLAC and WAV decoders. |
 | `src/tags.c` | Reads title and artist: ID3v2.2/2.3/2.4, ID3v1, FLAC Vorbis comments, WAV `LIST/INFO` and `id3 ` chunks. |
 | `src/playlist.c` | The track list, Previous/Next logic, and M3U/M3U8/PLS reading and writing. |

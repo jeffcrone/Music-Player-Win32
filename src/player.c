@@ -22,6 +22,7 @@
 
 #include "decoder.h"
 #include "text.h"
+#include "volume.h"
 
 #define NUM_BUFFERS 4
 /* ~93 ms per buffer at 44.1 kHz, ~370 ms queued in total: enough to ride
@@ -51,6 +52,8 @@ struct MpPlayer {
 	uint32_t rate;
 	uint32_t channels;
 	UINT generation;
+	int volume;    /* percent, 0..100 */
+	uint32_t gain; /* mp_volume_gain(volume), worked out once per change */
 };
 
 /* Refill every buffer the device has finished with. Caller holds the lock. */
@@ -74,6 +77,9 @@ static void service_locked(MpPlayer *p)
 			p->eof = 1;
 			break;
 		}
+		/* The volume is applied here, as each buffer is filled, so it costs
+		 * nothing at 100% and never touches a buffer the device holds. */
+		mp_volume_apply((int16_t *)p->hdr[i].lpData, (size_t)got * p->channels, p->gain);
 		p->hdr[i].dwBufferLength = (DWORD)(got * p->channels * sizeof(int16_t));
 		if (waveOutWrite(p->wo, &p->hdr[i], sizeof(WAVEHDR)) != MMSYSERR_NOERROR) {
 			/* The device went away (USB headset unplugged...). Treat it as
@@ -165,6 +171,9 @@ MpPlayer *mp_player_create(HWND notify_hwnd, UINT notify_msg)
 	InitializeCriticalSection(&p->lock);
 	p->notify_hwnd = notify_hwnd;
 	p->notify_msg = notify_msg;
+	/* Not left at calloc's zero, which would be silence. */
+	p->volume = MP_VOLUME_MAX;
+	p->gain = MP_VOLUME_UNITY;
 	/* Auto-reset: one wake-up services every finished buffer, so there is
 	 * nothing to lose if several completions collapse into one signal. */
 	p->event = CreateEventW(NULL, FALSE, FALSE, NULL);
@@ -377,4 +386,21 @@ UINT mp_player_generation(MpPlayer *p)
 	g = p->generation;
 	LeaveCriticalSection(&p->lock);
 	return g;
+}
+
+void mp_player_set_volume(MpPlayer *p, int percent)
+{
+	EnterCriticalSection(&p->lock);
+	p->volume = mp_volume_clamp(percent);
+	p->gain = mp_volume_gain(p->volume);
+	LeaveCriticalSection(&p->lock);
+}
+
+int mp_player_volume(MpPlayer *p)
+{
+	int v;
+	EnterCriticalSection(&p->lock);
+	v = p->volume;
+	LeaveCriticalSection(&p->lock);
+	return v;
 }

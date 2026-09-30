@@ -114,6 +114,17 @@ int suite_player(void)
 	mp_player_seek_ms(p, 1000);
 	CHECK_INT(mp_player_state(p), MP_PLAYER_EMPTY);
 
+	/* Volume: starts at full (files play unchanged), is clamped, and can be
+	 * set with nothing loaded. */
+	CHECK_INT(mp_player_volume(p), 100);
+	mp_player_set_volume(p, 40);
+	CHECK_INT(mp_player_volume(p), 40);
+	mp_player_set_volume(p, -10);
+	CHECK_INT(mp_player_volume(p), 0);
+	mp_player_set_volume(p, 250);
+	CHECK_INT(mp_player_volume(p), 100);
+	mp_player_set_volume(p, 70);
+
 	/* A file that does not exist: fails with a reason, stays empty. */
 	err[0] = 0;
 	CHECK(!mp_player_load(p, L"C:\\nope\\missing.wav", err, 256));
@@ -185,6 +196,22 @@ int suite_player(void)
 	CHECK(mp_player_generation(p) != gen);
 	CHECK_INT(mp_player_duration_ms(p), 400);
 
+	/* The volume belongs to the player, not the track: it survives loads,
+	 * stops and unloads alike. */
+	CHECK_INT(mp_player_volume(p), 70);
+
+	/* Changing the volume mid-play (including to silence, which is how the
+	 * window mutes) does not disturb playback. */
+	mp_player_play(p);
+	pump(100, 0);
+	mp_player_set_volume(p, 0);
+	CHECK_INT(mp_player_state(p), MP_PLAYER_PLAYING);
+	pump(100, 0);
+	mp_player_set_volume(p, 100);
+	pos = mp_player_position_ms(p);
+	CHECK(pos > 0 && pos <= 400);
+	mp_player_stop(p);
+
 	/* Loading a bad file after a good one leaves the player empty. */
 	CHECK(!mp_player_load(p, L"C:\\nope\\missing.wav", err, 256));
 	CHECK_INT(mp_player_state(p), MP_PLAYER_EMPTY);
@@ -193,6 +220,9 @@ int suite_player(void)
 	CHECK(mp_player_load(p, path, err, 256));
 	mp_player_unload(p);
 	CHECK_INT(mp_player_state(p), MP_PLAYER_EMPTY);
+	mp_player_set_volume(p, 30);
+	CHECK(mp_player_load(p, path, err, 256));
+	CHECK_INT(mp_player_volume(p), 30);
 	CHECK(mp_player_load(p, path, err, 256));
 	mp_player_play(p);
 	pump(50, 0);

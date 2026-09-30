@@ -27,6 +27,7 @@
 #include "text.h"
 #include "track.h"
 #include "version.h"
+#include "volume.h"
 
 #define APP_NAME L"Music Player"
 #define WINDOW_CLASS L"JeffCroneMusicPlayerWindow"
@@ -40,6 +41,11 @@
 /* Seek bar resolution. 1000 steps is finer than a pixel on any screen. */
 #define SEEK_RANGE 1000
 
+/* How far F9/F10 and the Volume Up/Down menu items move the volume, and the
+ * slider's arrow-key step to match. 5% is 20 presses from silent to full,
+ * which the squared volume curve (volume.h) makes feel even. */
+#define VOLUME_STEP 5
+
 /* The multi-select file dialog returns every chosen name in one buffer; this
  * holds roughly 1,500 typical file names. */
 #define PICK_BUFFER_CHARS 65536
@@ -51,6 +57,7 @@ typedef struct {
 	HINSTANCE inst;
 	HWND hwnd;
 	HWND title, artist, seek, time, list, status;
+	HWND vol_label, vol_bar;
 	HWND btn_prev, btn_play, btn_stop, btn_next, btn_add, btn_playlist;
 	HFONT font, title_font, bold_font;
 	HACCEL accel;
@@ -61,6 +68,11 @@ typedef struct {
 	MpPlaylist pl;
 	int repeat;
 	int dragging_seek;
+	/* The slider's level, kept while muted so unmuting goes back to it. The
+	 * player itself is only ever told the level actually heard. Neither is
+	 * saved between runs: the player keeps no settings (see RUNNING.md). */
+	int volume;
+	int muted;
 	MpPlayerState shown_state; /* what the Play button currently says */
 } App;
 
@@ -348,6 +360,49 @@ static void on_track_end(UINT generation)
 	play_from(next, 1, g.repeat);
 }
 
+/* ---- Volume ------------------------------------------------------------- */
+
+/* Pushes g.volume/g.muted out to the player, the slider, its label and the
+ * Mute menu check, so every way of changing the volume looks the same. */
+static void apply_volume(void)
+{
+	wchar_t text[32];
+	mp_player_set_volume(g.player, g.muted ? 0 : g.volume);
+	SendMessageW(g.vol_bar, TBM_SETPOS, TRUE, g.volume);
+	if (g.muted)
+		mp_wcopy(text, 32, L"Muted");
+	else
+		wsprintfW(text, L"Volume %d%%", g.volume);
+	SetWindowTextW(g.vol_label, text);
+	CheckMenuItem(GetMenu(g.hwnd), IDM_MUTE, g.muted ? MF_CHECKED : MF_UNCHECKED);
+}
+
+/* Any deliberate volume change unmutes, as in Windows' own volume control:
+ * otherwise turning it up while muted would seem to do nothing. */
+static void set_volume(int percent)
+{
+	g.volume = mp_volume_clamp(percent);
+	g.muted = 0;
+	apply_volume();
+}
+
+static void toggle_mute(void)
+{
+	g.muted = !g.muted;
+	apply_volume();
+}
+
+static void on_volume_scroll(void)
+{
+	int pos = (int)SendMessageW(g.vol_bar, TBM_GETPOS, 0, 0);
+	/* Unlike seeking, applied on every notification, including each step of
+	 * a drag, so the level can be set by ear. Only a real change counts:
+	 * the TB_ENDTRACK that ends every gesture, or clicking the thumb
+	 * without moving it, must not unmute. */
+	if (pos != g.volume)
+		set_volume(pos);
+}
+
 /* ---- File dialogs ------------------------------------------------------- */
 
 /* Shows the Open dialog (multi-select) and appends the chosen paths. */
@@ -589,6 +644,9 @@ static void on_command(int id)
 		g.repeat = !g.repeat;
 		CheckMenuItem(GetMenu(g.hwnd), IDM_REPEAT, g.repeat ? MF_CHECKED : MF_UNCHECKED);
 		break;
+	case IDM_VOLUME_UP: set_volume(g.volume + VOLUME_STEP); break;
+	case IDM_VOLUME_DOWN: set_volume(g.volume - VOLUME_STEP); break;
+	case IDM_MUTE: toggle_mute(); break;
 	case IDM_ABOUT: cmd_about(); break;
 	case IDOK:
 		/* IsDialogMessage turns Enter into IDOK. In the list it means "play
@@ -614,11 +672,29 @@ static int button_width(const wchar_t *longest_text)
 	return w < g.unit * 5 ? g.unit * 5 : w;
 }
 
+/* The volume label is sized for its widest text, so it does not resize (and
+ * shift the seek bar) as the numbers change. */
+static int volume_label_width(void)
+{
+	int a = text_width(g.font, L"Volume 100%"), b = text_width(g.font, L"Muted");
+	return (a > b ? a : b) + g.unit / 2;
+}
+
+static int volume_bar_width(void)
+{
+	return g.unit * 6;
+}
+
+static int time_width(void)
+{
+	return text_width(g.font, L"00:00:00 / 00:00:00") + g.unit;
+}
+
 static void layout(void)
 {
 	RECT rc, sr;
 	int m = g.unit * 2 / 3, gap = g.unit / 2;
-	int x, y, w, h, status_h, btn_h, time_w;
+	int x, y, w, h, status_h, btn_h, time_w, vl_w, vb_w, seek_w;
 	int wp = button_width(L"Previous"), wplay = button_width(L"Pause");
 	int ws = button_width(L"Stop"), wn = button_width(L"Next");
 	int wa = button_width(L"Add Files..."), wl = button_width(L"Open Playlist...");
@@ -637,10 +713,18 @@ static void layout(void)
 	MoveWindow(g.artist, x, y, w, g.unit + 2, TRUE);
 	y += g.unit + 2 + gap;
 
-	time_w = text_width(g.font, L"00:00:00 / 00:00:00") + g.unit;
+	/* The seek row: seek bar (taking whatever width is left), time, then
+	 * the volume label and slider at the right-hand end, where the volume
+	 * sits in most players. */
+	time_w = time_width();
+	vl_w = volume_label_width();
+	vb_w = volume_bar_width();
+	seek_w = w - time_w - vl_w - vb_w;
 	h = g.unit * 2;
-	MoveWindow(g.seek, x, y, w - time_w, h, TRUE);
-	MoveWindow(g.time, x + w - time_w, y + (h - g.unit) / 2, time_w, g.unit + 2, TRUE);
+	MoveWindow(g.seek, x, y, seek_w > 0 ? seek_w : 0, h, TRUE);
+	MoveWindow(g.time, x + seek_w, y + (h - g.unit) / 2, time_w, g.unit + 2, TRUE);
+	MoveWindow(g.vol_label, x + seek_w + time_w, y + (h - g.unit) / 2, vl_w, g.unit + 2, TRUE);
+	MoveWindow(g.vol_bar, x + w - vb_w, y, vb_w, h, TRUE);
 	y += h + gap;
 
 	btn_h = g.unit * 2 - g.unit / 4;
@@ -660,10 +744,14 @@ static void layout(void)
 
 static int min_client_width(void)
 {
-	int gap = g.unit / 2;
-	return button_width(L"Previous") + button_width(L"Pause") + button_width(L"Stop") +
+	int gap = g.unit / 2, margins = g.unit * 4 / 3;
+	int buttons = button_width(L"Previous") + button_width(L"Pause") + button_width(L"Stop") +
 		button_width(L"Next") + button_width(L"Add Files...") +
-		button_width(L"Open Playlist...") + 5 * gap + g.unit * 2 + g.unit * 4 / 3;
+		button_width(L"Open Playlist...") + 5 * gap + g.unit * 2;
+	/* The seek row must also fit, with a seek bar still wide enough to use.
+	 * The button row is normally the wider, but that depends on the font. */
+	int seek_row = g.unit * 8 + time_width() + volume_label_width() + volume_bar_width();
+	return (buttons > seek_row ? buttons : seek_row) + margins;
 }
 
 /* ---- Window creation ---------------------------------------------------- */
@@ -723,6 +811,15 @@ static void on_create(HWND hwnd)
 	SendMessageW(g.seek, TBM_SETPAGESIZE, 0, SEEK_RANGE / 20);
 	SendMessageW(g.seek, TBM_SETLINESIZE, 0, SEEK_RANGE / 100);
 	g.time = make_child(L"STATIC", L"", SS_RIGHT | SS_NOPREFIX, 0, IDC_TIME);
+	/* The label is created just before the slider on purpose: screen readers
+	 * name an unlabeled control after the static text preceding it, so the
+	 * slider is announced as "Volume 80%". Creation order is also the Tab
+	 * order: seek bar, volume, then the buttons. */
+	g.vol_label = make_child(L"STATIC", L"", SS_RIGHT | SS_NOPREFIX, 0, IDC_VOLUME_LABEL);
+	g.vol_bar = make_child(TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 0, IDC_VOLUME);
+	SendMessageW(g.vol_bar, TBM_SETRANGE, FALSE, MAKELPARAM(0, MP_VOLUME_MAX));
+	SendMessageW(g.vol_bar, TBM_SETLINESIZE, 0, VOLUME_STEP);
+	SendMessageW(g.vol_bar, TBM_SETPAGESIZE, 0, VOLUME_STEP * 4);
 
 	g.btn_prev = make_child(L"BUTTON", L"Previous", BS_PUSHBUTTON | WS_TABSTOP, 0, IDC_BTN_PREV);
 	g.btn_play = make_child(L"BUTTON", L"Play", BS_PUSHBUTTON | WS_TABSTOP, 0, IDC_BTN_PLAY);
@@ -871,6 +968,8 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 	case WM_HSCROLL:
 		if ((HWND)lp == g.seek)
 			on_seek_scroll(LOWORD(wp));
+		else if ((HWND)lp == g.vol_bar)
+			on_volume_scroll();
 		return 0;
 	case WM_TIMER:
 		if (wp == TIMER_POSITION)
@@ -974,6 +1073,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show)
 		MessageBoxW(g.hwnd, L"The audio engine could not be started.", APP_NAME, MB_OK | MB_ICONERROR);
 		return 1;
 	}
+	/* Full volume: the files play exactly as they are, as before this
+	 * program had a volume control. */
+	set_volume(MP_VOLUME_MAX);
 	update_now_playing();
 
 	/* A comfortable starting size in font units, so it looks the same at

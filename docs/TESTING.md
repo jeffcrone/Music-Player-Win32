@@ -22,7 +22,7 @@ ctest --test-dir build-x86 --output-on-failure
 A passing run ends like this (about 3 seconds):
 
 ```
-100% tests passed, 0 tests failed out of 10
+100% tests passed, 0 tests failed out of 11
 ```
 
 `--output-on-failure` prints a failing test's output (what it expected and
@@ -31,7 +31,7 @@ build (`MP_BUILD_TESTS=ON`), so `cmake --build` builds them too.
 
 ## What is tested
 
-The unit tests are one program, `mp_tests.exe`, holding six suites. CTest
+The unit tests are one program, `mp_tests.exe`, holding seven suites. CTest
 runs each suite as its own test, so a failure tells you which area broke.
 Test inputs (MP3, FLAC and WAV files, ID3 tags, playlists) are built byte by
 byte in memory by `tests/builders.c`, so every input is visible in the test
@@ -44,7 +44,8 @@ that uses it. There are no binary fixture files.
 | `track` | `tests/test_track.c` | The display rules (title falls back to the file name, a missing artist stays empty, whitespace counts as missing), file-name extraction, and time formatting from `0:00` up to `1193:02:47`. |
 | `playlist` | `tests/test_playlist.c` | M3U parsing (directives, blank lines, LF/CRLF/CR, padding). Relative, rooted, absolute, UNC and forward-slash paths. `file://` URLs with %-escapes, UNC hosts and the legacy `C\|` form. Stream URLs skipped. UTF-8/UTF-16/ANSI detection. PLS numbering and ordering. Previous/Next stepping and wrap-around. Removing tracks while one is playing. `.m3u8` saving with relative paths and a round trip back through the parser. |
 | `decoder` | `tests/test_decoder.c` | Format detection by content (and by extension only as a fallback). Exact sample-for-sample decoding of WAV (8/16/24-bit, float, 6-channel downmix) and FLAC (stereo and mono, multiple frames, seeking), with MP3 checked as known silence (length, seeking, tags at both ends). The workaround for dr_flac's ID3-in-front bug. Error messages for missing, empty, corrupt and unsupported files. |
-| `player` | `tests/test_player.c` | Real playback through waveOut: load, play, pause (position holds), seek while paused, play to the end (exactly one end-of-track notice), replay after the end, stop, replace, unload, and shutting down while playing. [Needs a sound device.](#the-playback-tests) |
+| `player` | `tests/test_player.c` | Real playback through waveOut: load, play, pause (position holds), seek while paused, play to the end (exactly one end-of-track notice), replay after the end, stop, replace, unload, and shutting down while playing. The volume: starts at 100, is clamped, survives loads and unloads, and can change mid-play. [Needs a sound device.](#the-playback-tests) |
+| `volume` | `tests/test_volume.c` | The software volume. The slider-to-gain curve (exact at 0% and 100%, strictly rising, clamped out of range), and sample scaling: bit-exact at full volume, silence at zero, symmetric rounding for negative samples, no overflow at the 16-bit extremes, and only the given samples touched. Needs no sound device, so it runs on CI too. |
 | `xpcheck_self_test`, `xp_compat_app`, `xp_compat_tests` | `tests/xpcheck.c` | The Windows XP check, on both `MusicPlayer.exe` and `mp_tests.exe`. Only in XP-compatible (msvcrt) builds. [Details below.](#the-windows-xp-check) |
 | `icons` | `tools/test_make_icons.py` | The icon generator, and that `Music_Icons/` matches it. Only if CMake finds Python. [Details below.](#the-icon-tests) |
 
@@ -93,7 +94,7 @@ Windows Audio service stopped) can't run it. The suite then reports
 **skipped** rather than failed:
 
 ```
-6/10 Test  #6: player ...........................***Skipped   0.01 sec
+6/11 Test  #6: player ...........................***Skipped   0.01 sec
 ```
 
 If it skips on your own PC, check that a playback device is enabled in
@@ -224,12 +225,17 @@ characters in its tags.
     explains it can't be found. With Next, it's skipped.
 13. Resize the window small and large. Controls stay tidy, and long titles
     end in "...".
-14. Tab through the controls. Ctrl+P, Ctrl+S, Ctrl+B, Ctrl+F and the media keys
+14. Drag the **volume** slider while music plays: the level follows within
+    a moment and the label shows the percentage. F9/F10 step it by 5%. F8
+    mutes ("Muted", and Playback > Mute is checked), and F8 again, or
+    moving the slider, brings the sound back at the slider's level.
+15. Tab through the controls. Ctrl+P, Ctrl+S, Ctrl+B, Ctrl+F and the media keys
     work while the window is active.
-15. Play music with World of Warcraft (or any game) running in windowed
-    mode. Alt+Tab between them, and set their volumes separately in the
-    Volume Mixer.
-16. At 150% display scaling (Settings > Display > Scale), the window is
+16. Play music with World of Warcraft (or any game) running in windowed
+    mode. Alt+Tab between them. Turning the player's volume slider down
+    must not change the game's volume (check this on XP too, where a
+    shared device volume would be the telltale bug).
+17. At 150% display scaling (Settings > Display > Scale), the window is
     sharp and proportioned, not blurry or cramped.
 
 ## Testing on Windows XP

@@ -21,6 +21,9 @@
 #define IDM_PREVIOUS        1103
 #define IDM_NEXT            1104
 #define IDM_REPEAT          1105
+#define IDM_VOLUME_UP       1106
+#define IDM_VOLUME_DOWN     1107
+#define IDM_MUTE            1108
 #define IDM_ABOUT           1201
 
 /* Child control IDs. */
@@ -36,5 +39,7 @@
 #define IDC_BTN_NEXT        2104
 #define IDC_BTN_ADD         2105
 #define IDC_BTN_PLAYLIST    2106
+#define IDC_VOLUME_LABEL    2007
+#define IDC_VOLUME          2008
 
 #endif
