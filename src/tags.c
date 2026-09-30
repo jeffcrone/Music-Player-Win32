@@ -1,0 +1,598 @@
+/*
+ * tags.c - title/artist extraction. See tags.h for what is supported.
+ *
+ * Every size field read from a file is treated as hostile: it is checked
+ * against what is actually left before it is used, so a truncated or
+ * corrupt tag can make us miss a title but can never make us read out of
+ * bounds or allocate gigabytes.
+ */
+#include "tags.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+#include "text.h"
+
+/* How much of a single text frame / field we look at. 4 KB holds far more
+ * than MP_TAG_MAX characters in any encoding. */
+#define FIELD_READ_MAX 4096u
+
+/* A v2.3 tag with tag-level unsynchronization has to be loaded whole to be
+ * decoded. Refuse anything bigger than this (it would be almost all cover
+ * art anyway). */
+#define UNSYNC_TAG_MAX (16u * 1024u * 1024u)
+
+/* Vorbis comment blocks can carry base64 cover art; the text fields come
+ * first in practice, so this much is plenty. */
+#define VORBIS_BLOCK_MAX (1024u * 1024u)
+
+/* Upper bounds on loop iterations, so a crafted file with thousands of
+ * tiny chunks cannot keep us busy. */
+#define MAX_FLAC_BLOCKS 256
+#define MAX_RIFF_CHUNKS 4096
+#define MAX_STACKED_ID3 4
+
+typedef struct {
+	wchar_t title[MP_TAG_MAX];
+	wchar_t artist[MP_TAG_MAX];
+	wchar_t album_artist[MP_TAG_MAX];
+} Slots;
+
+/* First value wins: a slot that already holds something is left alone. That
+ * matches the ID3 convention that repeated frames are a mistake and the
+ * first one is authoritative. Whitespace-only values do not count. */
+static void offer(wchar_t *slot, wchar_t *value)
+{
+	if (slot[0] != 0)
+		return;
+	if (mp_trim(value) == 0)
+		return;
+	mp_wcopy(slot, MP_TAG_MAX, value);
+}
+
+static uint32_t be32(const uint8_t *p)
+{
+	return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+}
+
+static uint32_t be24(const uint8_t *p)
+{
+	return (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2];
+}
+
+static uint32_t le32(const uint8_t *p)
+{
+	return (uint32_t)p[3] << 24 | (uint32_t)p[2] << 16 | (uint32_t)p[1] << 8 | p[0];
+}
+
+/* ID3v2 "syncsafe" integers use 7 bits per byte so that no size field can
+ * contain a 0xFF byte that an old MP3 decoder might mistake for audio. */
+static uint32_t syncsafe32(const uint8_t *p)
+{
+	return (uint32_t)(p[0] & 0x7F) << 21 | (uint32_t)(p[1] & 0x7F) << 14 |
+		(uint32_t)(p[2] & 0x7F) << 7 | (p[3] & 0x7F);
+}
+
+/* Undo ID3 unsynchronization: the encoder inserted a 0x00 after every 0xFF,
+ * so drop each 0x00 that follows a 0xFF. In place; returns the new length. */
+static size_t remove_unsync(uint8_t *buf, size_t n)
+{
+	size_t in = 0, out = 0;
+	while (in < n) {
+		uint8_t b = buf[in++];
+		buf[out++] = b;
+		if (b == 0xFF && in < n && buf[in] == 0x00)
+			in++;
+	}
+	return out;
+}
+
+/* ---- ID3v2 -------------------------------------------------------------- */
+
+/* The tag body, either still in the file or loaded into memory (only when
+ * tag-level unsynchronization forces us to decode it all first). */
+typedef struct {
+	MpStream *s;
+	int64_t base;
+	const uint8_t *mem;
+	size_t size;
+} Body;
+
+static int body_read(const Body *b, size_t off, void *buf, size_t n)
+{
+	if (off > b->size || n > b->size - off)
+		return 0;
+	if (b->mem != NULL) {
+		memcpy(buf, b->mem + off, n);
+		return 1;
+	}
+	return mp_stream_read_at(b->s, b->base + (int64_t)off, buf, n);
+}
+
+/* Decode an ID3v2 text frame's content (encoding byte + text). */
+static void id3_text(const uint8_t *d, size_t n, wchar_t *out)
+{
+	uint8_t enc;
+	out[0] = 0;
+	if (n < 1)
+		return;
+	enc = d[0];
+	d++;
+	n--;
+	switch (enc) {
+	case 0: /* ISO-8859-1 on paper; Windows-1252 in practice. */
+		mp_cp1252_decode(d, n, out, MP_TAG_MAX);
+		break;
+	case 1: /* UTF-16 with a byte order mark. */
+		if (n >= 2 && d[0] == 0xFE && d[1] == 0xFF)
+			mp_utf16_decode(d + 2, n - 2, 1, out, MP_TAG_MAX);
+		else if (n >= 2 && d[0] == 0xFF && d[1] == 0xFE)
+			mp_utf16_decode(d + 2, n - 2, 0, out, MP_TAG_MAX);
+		else /* BOM missing: a common tagger bug; they were all little-endian. */
+			mp_utf16_decode(d, n, 0, out, MP_TAG_MAX);
+		break;
+	case 2: /* UTF-16BE, no BOM by spec - but tolerate one. */
+		if (n >= 2 && d[0] == 0xFE && d[1] == 0xFF)
+			mp_utf16_decode(d + 2, n - 2, 1, out, MP_TAG_MAX);
+		else if (n >= 2 && d[0] == 0xFF && d[1] == 0xFE)
+			mp_utf16_decode(d + 2, n - 2, 0, out, MP_TAG_MAX);
+		else
+			mp_utf16_decode(d, n, 1, out, MP_TAG_MAX);
+		break;
+	case 3: /* UTF-8; skip a stray BOM some tools add. */
+		if (n >= 3 && d[0] == 0xEF && d[1] == 0xBB && d[2] == 0xBF) {
+			d += 3;
+			n -= 3;
+		}
+		mp_utf8_decode(d, n, out, MP_TAG_MAX);
+		break;
+	default:
+		break;
+	}
+	/* Decoding stops at the first NUL, which is exactly right for v2.4's
+	 * NUL-separated multiple values: we keep the first one. */
+}
+
+static wchar_t *id3_slot_for(Slots *slots, const char *id, int major)
+{
+	if (major == 2) {
+		if (memcmp(id, "TT2", 3) == 0) return slots->title;
+		if (memcmp(id, "TP1", 3) == 0) return slots->artist;
+		if (memcmp(id, "TP2", 3) == 0) return slots->album_artist;
+	} else {
+		if (memcmp(id, "TIT2", 4) == 0) return slots->title;
+		if (memcmp(id, "TPE1", 4) == 0) return slots->artist;
+		if (memcmp(id, "TPE2", 4) == 0) return slots->album_artist;
+	}
+	return NULL;
+}
+
+static int is_frame_id_char(uint8_t c)
+{
+	return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+}
+
+static void id3_frames(const Body *body, size_t pos, int major, int tag_flags, Slots *slots)
+{
+	const size_t hdr_len = (major == 2) ? 6 : 10;
+	const size_t id_len = (major == 2) ? 3 : 4;
+	uint8_t buf[FIELD_READ_MAX];
+	wchar_t text[MP_TAG_MAX];
+
+	while (pos <= body->size && body->size - pos >= hdr_len) {
+		uint8_t fh[10];
+		char id[5] = { 0 };
+		uint32_t fsize;
+		unsigned fflags = 0;
+		size_t k, n, skip = 0;
+		int frame_unsync = 0;
+		wchar_t *slot;
+
+		if (!body_read(body, pos, fh, hdr_len))
+			break;
+		/* A zero byte where a frame ID should be is the start of padding. */
+		if (fh[0] == 0)
+			break;
+		for (k = 0; k < id_len; k++) {
+			if (!is_frame_id_char(fh[k]))
+				return; /* garbage: stop rather than guess */
+			id[k] = (char)fh[k];
+		}
+		if (major == 2) {
+			fsize = be24(fh + 3);
+		} else if (major == 3) {
+			fsize = be32(fh + 4);
+			fflags = (unsigned)fh[8] << 8 | fh[9];
+		} else {
+			/* v2.4 frame sizes are syncsafe, but some old iTunes versions
+			 * wrote plain 32-bit sizes into v2.4 tags. A byte with its high
+			 * bit set cannot be syncsafe, so fall back to plain in that case. */
+			if ((fh[4] | fh[5] | fh[6] | fh[7]) & 0x80)
+				fsize = be32(fh + 4);
+			else
+				fsize = syncsafe32(fh + 4);
+			fflags = (unsigned)fh[8] << 8 | fh[9];
+		}
+		pos += hdr_len;
+		if (fsize > body->size - pos)
+			break; /* frame claims to run past the tag */
+
+		slot = id3_slot_for(slots, id, major);
+		if (slot != NULL && slot[0] == 0 && fsize > 0) {
+			int usable = 1;
+			if (major == 3) {
+				/* 0x0080 compression (zlib), 0x0040 encryption: not worth
+				 * supporting for a title; skip rather than show garbage. */
+				if (fflags & 0x00C0)
+					usable = 0;
+				if (fflags & 0x0020)
+					skip += 1; /* grouping identity byte */
+			} else if (major == 4) {
+				/* 0x0008 compression, 0x0004 encryption. */
+				if (fflags & 0x000C)
+					usable = 0;
+				if (fflags & 0x0040)
+					skip += 1; /* grouping identity byte */
+				if (fflags & 0x0001)
+					skip += 4; /* data length indicator */
+				/* In v2.4 the tag-level unsync flag means "every frame is
+				 * unsynchronized", so it applies per frame. */
+				frame_unsync = (fflags & 0x0002) || (tag_flags & 0x80);
+			}
+			n = fsize < FIELD_READ_MAX ? fsize : FIELD_READ_MAX;
+			if (usable && n > skip && body_read(body, pos, buf, n)) {
+				size_t len = n - skip;
+				if (frame_unsync)
+					len = remove_unsync(buf + skip, len);
+				id3_text(buf + skip, len, text);
+				offer(slot, text);
+			}
+		}
+		pos += fsize;
+	}
+}
+
+/*
+ * Parses an ID3v2 tag at `offset`, if there is one. `avail` is how many
+ * bytes of the stream belong to the region the tag lives in (the rest of the
+ * file, or the enclosing RIFF chunk). Returns the number of bytes the tag
+ * occupies, or 0 if there is no ID3v2 tag at that offset.
+ */
+static int64_t id3v2_parse(MpStream *s, int64_t offset, int64_t avail, Slots *slots)
+{
+	uint8_t h[10];
+	uint32_t body_size;
+	int major, flags;
+	int64_t total;
+	Body body;
+	uint8_t *loaded = NULL;
+	size_t pos = 0;
+
+	if (avail < 10 || !mp_stream_read_at(s, offset, h, 10))
+		return 0;
+	if (h[0] != 'I' || h[1] != 'D' || h[2] != '3')
+		return 0;
+	if (h[3] == 0xFF || h[4] == 0xFF || ((h[6] | h[7] | h[8] | h[9]) & 0x80))
+		return 0;
+	major = h[3];
+	flags = h[5];
+	body_size = syncsafe32(h + 6);
+	total = 10 + (int64_t)body_size + ((major == 4 && (flags & 0x10)) ? 10 : 0);
+
+	/* Versions we do not understand are still skipped over correctly. In
+	 * v2.2, flag 0x40 means the whole tag is compressed - no known tool ever
+	 * wrote that and the spec never defined the scheme. */
+	if (major < 2 || major > 4 || (major == 2 && (flags & 0x40)))
+		return total;
+
+	memset(&body, 0, sizeof(body));
+	body.s = s;
+	body.base = offset + 10;
+	/* A tag claiming to be bigger than the file (a truncated download, say)
+	 * is read as far as the data actually goes. */
+	body.size = body_size;
+	if ((int64_t)body.size > avail - 10)
+		body.size = (size_t)(avail - 10);
+
+	if ((flags & 0x80) && major <= 3) {
+		/* v2.2/v2.3 tag-level unsynchronization covers the frame headers
+		 * too, so frame offsets in the file are meaningless until the
+		 * whole body is decoded. */
+		if (body.size > UNSYNC_TAG_MAX)
+			return total;
+		loaded = (uint8_t *)malloc(body.size ? body.size : 1);
+		if (loaded == NULL)
+			return total;
+		if (!mp_stream_read_at(s, body.base, loaded, body.size)) {
+			free(loaded);
+			return total;
+		}
+		body.size = remove_unsync(loaded, body.size);
+		body.mem = loaded;
+	}
+
+	if (flags & 0x40) {
+		/* Extended header; we only need to know how long it is. */
+		uint8_t eh[4];
+		if (!body_read(&body, 0, eh, 4)) {
+			free(loaded);
+			return total;
+		}
+		if (major == 3) {
+			/* v2.3: size excludes the 4-byte size field itself. */
+			uint32_t ext = be32(eh);
+			if (ext > body.size - 4) {
+				free(loaded);
+				return total;
+			}
+			pos = 4 + ext;
+		} else {
+			/* v2.4: syncsafe, and includes itself (minimum 6). */
+			uint32_t ext = syncsafe32(eh);
+			if (ext < 6 || ext > body.size) {
+				free(loaded);
+				return total;
+			}
+			pos = ext;
+		}
+	}
+
+	id3_frames(&body, pos, major, flags, slots);
+	free(loaded);
+	return total;
+}
+
+/* ---- ID3v1 -------------------------------------------------------------- */
+
+static void id3v1_parse(MpStream *s, Slots *slots)
+{
+	uint8_t t[128];
+	wchar_t text[MP_TAG_MAX];
+	int64_t size = mp_stream_size(s);
+	if (size < 128 || !mp_stream_read_at(s, size - 128, t, 128))
+		return;
+	if (t[0] != 'T' || t[1] != 'A' || t[2] != 'G')
+		return;
+	/* Fixed 30-byte fields, padded with NULs or (by some tools) spaces;
+	 * the decoder stops at the NUL and offer() trims the spaces. */
+	mp_cp1252_decode(t + 3, 30, text, MP_TAG_MAX);
+	offer(slots->title, text);
+	mp_cp1252_decode(t + 33, 30, text, MP_TAG_MAX);
+	offer(slots->artist, text);
+}
+
+/* ---- FLAC / Vorbis comments --------------------------------------------- */
+
+static int field_is(const uint8_t *key, size_t key_len, const char *name)
+{
+	return strlen(name) == key_len && mp_ascii_ieq_n((const char *)key, name, key_len);
+}
+
+static void vorbis_comments(const uint8_t *d, size_t n, Slots *slots)
+{
+	size_t p;
+	uint32_t vendor_len, count, i;
+	wchar_t text[MP_TAG_MAX];
+
+	/* Everything in a Vorbis comment is little-endian, unlike the FLAC
+	 * block header around it. */
+	if (n < 4)
+		return;
+	vendor_len = le32(d);
+	p = 4;
+	if (vendor_len > n - p)
+		return;
+	p += vendor_len;
+	if (n - p < 4)
+		return;
+	count = le32(d + p);
+	p += 4;
+	for (i = 0; i < count; i++) {
+		uint32_t len;
+		const uint8_t *field;
+		size_t eq;
+		if (n - p < 4)
+			return;
+		len = le32(d + p);
+		p += 4;
+		if (len > n - p)
+			return;
+		field = d + p;
+		p += len;
+		for (eq = 0; eq < len && field[eq] != '='; eq++)
+			;
+		if (eq == len)
+			continue;
+		mp_utf8_decode(field + eq + 1, len - eq - 1, text, MP_TAG_MAX);
+		/* Field names are case-insensitive ASCII per the Vorbis spec. There
+		 * is no standard album-artist name, so accept the common spellings. */
+		if (field_is(field, eq, "TITLE"))
+			offer(slots->title, text);
+		else if (field_is(field, eq, "ARTIST"))
+			offer(slots->artist, text);
+		else if (field_is(field, eq, "ALBUMARTIST") || field_is(field, eq, "ALBUM ARTIST") ||
+			field_is(field, eq, "ALBUM_ARTIST"))
+			offer(slots->album_artist, text);
+	}
+}
+
+static void flac_parse(MpStream *s, int64_t off, Slots *slots)
+{
+	int blocks;
+	for (blocks = 0; blocks < MAX_FLAC_BLOCKS; blocks++) {
+		uint8_t bh[4];
+		int last, type;
+		uint32_t len;
+		if (!mp_stream_read_at(s, off, bh, 4))
+			return;
+		last = bh[0] & 0x80;
+		type = bh[0] & 0x7F;
+		len = be24(bh + 1);
+		off += 4;
+		if (type == 127)
+			return; /* reserved as invalid by the spec */
+		if (type == 4) {
+			size_t want = len < VORBIS_BLOCK_MAX ? len : VORBIS_BLOCK_MAX;
+			uint8_t *buf = (uint8_t *)malloc(want ? want : 1);
+			if (buf != NULL) {
+				size_t got = 0;
+				/* A partial read (truncated file) still yields the fields
+				 * that made it; vorbis_comments bounds-checks every one. */
+				if (mp_stream_seek(s, off, MP_SEEK_SET))
+					got = mp_stream_read(s, buf, want);
+				vorbis_comments(buf, got, slots);
+				free(buf);
+			}
+		}
+		off += len;
+		if (last)
+			return;
+	}
+}
+
+/* ---- WAV (RIFF) --------------------------------------------------------- */
+
+static void riff_info(MpStream *s, int64_t off, int64_t end, Slots *slots)
+{
+	uint8_t buf[FIELD_READ_MAX];
+	wchar_t text[MP_TAG_MAX];
+	int i;
+	for (i = 0; i < MAX_RIFF_CHUNKS && end - off >= 8; i++) {
+		uint8_t ch[8];
+		uint32_t len;
+		wchar_t *slot = NULL;
+		if (!mp_stream_read_at(s, off, ch, 8))
+			return;
+		len = le32(ch + 4);
+		if (memcmp(ch, "INAM", 4) == 0)
+			slot = slots->title;
+		else if (memcmp(ch, "IART", 4) == 0)
+			slot = slots->artist;
+		if (slot != NULL) {
+			size_t n = len < FIELD_READ_MAX ? len : FIELD_READ_MAX;
+			if ((int64_t)n > end - off - 8)
+				n = (size_t)(end - off - 8);
+			if (mp_stream_read_at(s, off + 8, buf, n)) {
+				/* The RIFF spec predates Unicode and just says "ZSTR".
+				 * Modern tools write UTF-8, older ones the ANSI code page;
+				 * valid UTF-8 is very unlikely to be accidental. */
+				if (mp_utf8_is_valid(buf, n))
+					mp_utf8_decode(buf, n, text, MP_TAG_MAX);
+				else
+					mp_cp1252_decode(buf, n, text, MP_TAG_MAX);
+				offer(slot, text);
+			}
+		}
+		/* Chunks are padded to an even length. */
+		off += 8 + (int64_t)len + (len & 1);
+	}
+}
+
+static void wav_parse(MpStream *s, Slots *id3_slots, Slots *info_slots)
+{
+	uint8_t h[12];
+	int64_t size = mp_stream_size(s), end, off = 12;
+	int i;
+	if (!mp_stream_read_at(s, 0, h, 12))
+		return;
+	if (memcmp(h, "RIFF", 4) != 0 || memcmp(h + 8, "WAVE", 4) != 0)
+		return;
+	/* Trust the smaller of the RIFF size and the real file size: writers
+	 * that crashed mid-recording often leave the RIFF size wrong. */
+	end = 8 + (int64_t)le32(h + 4);
+	if (end > size)
+		end = size;
+	for (i = 0; i < MAX_RIFF_CHUNKS && end - off >= 8; i++) {
+		uint8_t ch[8];
+		uint32_t len;
+		int64_t data;
+		if (!mp_stream_read_at(s, off, ch, 8))
+			return;
+		len = le32(ch + 4);
+		data = off + 8;
+		if (memcmp(ch, "LIST", 4) == 0 && len >= 4) {
+			uint8_t type[4];
+			if (mp_stream_read_at(s, data, type, 4) && memcmp(type, "INFO", 4) == 0) {
+				int64_t list_end = data + len;
+				if (list_end > end)
+					list_end = end;
+				riff_info(s, data + 4, list_end, info_slots);
+			}
+		} else if (memcmp(ch, "id3 ", 4) == 0 || memcmp(ch, "ID3 ", 4) == 0) {
+			int64_t avail = end - data;
+			if (avail > (int64_t)len)
+				avail = len;
+			id3v2_parse(s, data, avail, id3_slots);
+		}
+		off = data + (int64_t)len + (len & 1);
+	}
+}
+
+/* ---- Entry points ------------------------------------------------------- */
+
+int mp_tags_read_stream(MpStream *s, MpTags *tags)
+{
+	/* In precedence order; see tags.h. */
+	Slots *src;
+	Slots *all;
+	int64_t size, start = 0;
+	uint8_t magic[4];
+	int i, n = 4;
+
+	tags->title[0] = 0;
+	tags->artist[0] = 0;
+	if (s == NULL)
+		return 0;
+	/* Slots are ~1.5 KB each; keep them off the (small, on XP) stack. */
+	all = (Slots *)calloc((size_t)n, sizeof(Slots));
+	if (all == NULL)
+		return 0;
+	size = mp_stream_size(s);
+
+	/* Some tools stack several ID3v2 tags; the first one is the real one,
+	 * but we must skip them all to find the audio's own header. */
+	for (i = 0; i < MAX_STACKED_ID3; i++) {
+		int64_t len = id3v2_parse(s, start, size - start, &all[0]);
+		if (len <= 0)
+			break;
+		start += len;
+	}
+
+	if (mp_stream_read_at(s, start, magic, 4) && memcmp(magic, "fLaC", 4) == 0) {
+		flac_parse(s, start + 4, &all[1]);
+	} else if (mp_stream_read_at(s, 0, magic, 4) && memcmp(magic, "RIFF", 4) == 0) {
+		wav_parse(s, &all[1], &all[2]);
+	} else {
+		/* MP3 (or unknown): the only place ID3v1 is meaningful. */
+		id3v1_parse(s, &all[3]);
+	}
+
+	for (i = 0; i < n; i++) {
+		src = &all[i];
+		if (tags->title[0] == 0 && src->title[0] != 0)
+			mp_wcopy(tags->title, MP_TAG_MAX, src->title);
+		if (tags->artist[0] == 0 && src->artist[0] != 0)
+			mp_wcopy(tags->artist, MP_TAG_MAX, src->artist);
+	}
+	/* Album artist is only a fallback when no source has a track artist. */
+	for (i = 0; i < n && tags->artist[0] == 0; i++) {
+		if (all[i].album_artist[0] != 0)
+			mp_wcopy(tags->artist, MP_TAG_MAX, all[i].album_artist);
+	}
+	free(all);
+	return tags->title[0] != 0 || tags->artist[0] != 0;
+}
+
+int mp_tags_read_file(const wchar_t *path, MpTags *tags)
+{
+	MpStream *s;
+	int found;
+	tags->title[0] = 0;
+	tags->artist[0] = 0;
+	s = mp_stream_open_file(path, NULL);
+	if (s == NULL)
+		return 0;
+	found = mp_tags_read_stream(s, tags);
+	mp_stream_close(s);
+	return found;
+}

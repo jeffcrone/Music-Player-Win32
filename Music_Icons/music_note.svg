@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+	<title>Music Player</title>
+	<defs>
+		<linearGradient id="noteFill" x1="0" y1="0" x2="0" y2="256" gradientUnits="userSpaceOnUse">
+			<stop offset="0" stop-color="#4A90E2"/>
+			<stop offset="1" stop-color="#1F4E9A"/>
+		</linearGradient>
+	</defs>
+	<g fill="url(#noteFill)">
+		<ellipse cx="100" cy="184" rx="54" ry="38" transform="rotate(-22 100 184)"/>
+		<rect x="134" y="32" width="18" height="144"/>
+		<path d="M 152 32 C 160 74, 222 92, 206 156 C 200 124, 180 106, 152 102 Z"/>
+	</g>
+</svg>

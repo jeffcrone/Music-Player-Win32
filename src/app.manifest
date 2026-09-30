@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+	Application manifest, embedded as resource RT_MANIFEST #1 by app.rc.
+
+	- The Common-Controls 6.0 dependency gives buttons, the list and the seek
+	  bar the current Windows theme (Luna on XP, Aero on 7, the flat style on
+	  10/11) instead of the Windows 95 look.
+	- trustInfo uses the asm.v2 namespace on purpose: Windows XP SP2's loader
+	  rejects the asm.v3 spelling and the exe would fail to start there.
+	- dpiAware stops Vista and later from bitmap-stretching the window into a
+	  blur on high-DPI screens; the app lays itself out from the system font
+	  size, so it scales properly. XP ignores the element.
+	- supportedOS lists Vista, 7, 8, 8.1 and 10/11 so those versions do not
+	  apply compatibility shims.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+	<assemblyIdentity type="win32" name="MusicPlayer" version="1.0.0.0" processorArchitecture="*"/>
+	<description>Music Player</description>
+	<dependency>
+		<dependentAssembly>
+			<assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/>
+		</dependentAssembly>
+	</dependency>
+	<trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
+		<security>
+			<requestedPrivileges>
+				<requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+			</requestedPrivileges>
+		</security>
+	</trustInfo>
+	<compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+		<application>
+			<supportedOS Id="{e2011457-1546-43c5-a5fe-008deee3d3f0}"/>
+			<supportedOS Id="{35138b9a-5d96-4fbd-8e2d-a2440225f93a}"/>
+			<supportedOS Id="{4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38}"/>
+			<supportedOS Id="{1f676c76-80e1-4239-95bb-83d0f6d0da78}"/>
+			<supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+		</application>
+	</compatibility>
+	<application xmlns="urn:schemas-microsoft-com:asm.v3">
+		<windowsSettings>
+			<dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true</dpiAware>
+		</windowsSettings>
+	</application>
+</assembly>

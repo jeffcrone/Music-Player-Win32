@@ -1,0 +1,195 @@
+# Cuts a release when the version number changes on main.
+#
+# The version lives in exactly one place: the project(MusicPlayer VERSION
+# x.y.z) line in CMakeLists.txt. Bumping it and pushing to main IS the
+# release: this workflow notices the change, builds and tests both
+# architectures, and only then creates the vX.Y.Z tag and a GitHub release
+# with the zipped builds attached. It never depends on a tag existing.
+#
+# A push that leaves the version alone releases nothing (the cheap "check"
+# job says so and everything else is skipped).
+#
+# Run it by hand from the Actions tab to (re)release the current version.
+# Every step is idempotent: the tag and release are only created if missing,
+# and assets are replaced rather than failing on "already exists", so a
+# re-run of a half-finished release completes it.
+
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never run two releases at once; queue them instead.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Did the version change?
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release: ${{ steps.version.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: version
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          # Pull x.y.z out of "project(MusicPlayer VERSION x.y.z ...)".
+          extract() {
+            sed -nE 's/^[[:space:]]*project[[:space:]]*\([[:space:]]*MusicPlayer[[:space:]]+VERSION[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | head -n 1
+          }
+          version=$(extract < CMakeLists.txt)
+          if [ -z "$version" ]; then
+            echo "::error::Could not find 'project(MusicPlayer VERSION x.y.z' in CMakeLists.txt"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "Run by hand: releasing $version."
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # A push can hold several commits, so compare against the commit
+          # before the push, not HEAD~1. All zeros means the branch was just
+          # created, i.e. there is no "before" to compare with.
+          previous=""
+          if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            if git fetch --no-tags --depth=1 origin "$BEFORE" 2>/dev/null; then
+              previous=$(git show "$BEFORE:CMakeLists.txt" 2>/dev/null | extract || true)
+            fi
+          fi
+          if [ "$previous" = "$version" ]; then
+            echo "Version is still $version: nothing to release."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Version changed from '${previous:-none}' to $version: releasing."
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build and test (${{ matrix.arch }})
+    needs: check
+    if: needs.check.outputs.release == 'true'
+    runs-on: windows-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: x86
+            msystem: MINGW32
+            packages: >-
+              mingw-w64-i686-gcc
+              mingw-w64-i686-cmake
+              mingw-w64-i686-ninja
+          - arch: x64
+            msystem: MINGW64
+            packages: >-
+              mingw-w64-x86_64-gcc
+              mingw-w64-x86_64-cmake
+              mingw-w64-x86_64-ninja
+              mingw-w64-x86_64-python
+              mingw-w64-x86_64-python-pillow
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: false
+          install: ${{ matrix.packages }}
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build
+
+      # A failing test fails the release: no tag, no GitHub release.
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "MusicPlayer-${{ needs.check.outputs.version }}-windows-${{ matrix.arch }}"
+          New-Item -ItemType Directory -Force "dist/$name" | Out-Null
+          Copy-Item build/MusicPlayer.exe, README.md, LICENSE "dist/$name/"
+          Copy-Item docs/RUNNING.md "dist/$name/RUNNING.md"
+          Copy-Item third_party/dr_libs/LICENSE "dist/$name/LICENSE-dr_libs.txt"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip" -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.arch }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+  release:
+    name: Tag and publish
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create the tag (if missing)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ needs.check.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Tags are only created here, after both builds and all tests
+          # passed, so a failed run never leaves a dangling tag.
+          if existing=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha 2>/dev/null); then
+            if [ "$existing" != "$GITHUB_SHA" ]; then
+              echo "::error::Tag $TAG already exists on commit $existing, not on $GITHUB_SHA. Bump the version in CMakeLists.txt to release this commit."
+              exit 1
+            fi
+            echo "Tag $TAG already exists on this commit."
+          else
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" > /dev/null
+            echo "Created tag $TAG on $GITHUB_SHA."
+          fi
+
+      - name: Create the release (if missing) and upload the builds
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ needs.check.outputs.version }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "Release $TAG already exists."
+          else
+            notes="Music Player $VERSION for Windows.
+
+          - **MusicPlayer-$VERSION-windows-x86.zip** is built for every version from Windows XP SP3 to Windows 11, 32- or 64-bit.
+          - **MusicPlayer-$VERSION-windows-x64.zip** is the 64-bit build, for 64-bit Windows (XP x64 and later).
+
+          No installation needed: unzip and run MusicPlayer.exe. See RUNNING.md inside the zip."
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "Music Player $VERSION" --notes "$notes"
+          fi
+          # --clobber replaces assets from an earlier, half-finished run.
+          gh release upload "$TAG" dist/*.zip --repo "$GITHUB_REPOSITORY" --clobber

@@ -1,0 +1,24 @@
+# CMake build directories (any name starting with "build", plus "out").
+/build*/
+/out/
+
+# Python bytecode from tools/.
+__pycache__/
+*.pyc
+
+# Editor clutter.
+.vs/
+.vscode/
+*.swp
+
+# Claude Code's own files. They only steer or record the assistant's work, and
+# are not part of the player, so they stay out of the repository.
+# - CLAUDE.md / CLAUDE.local.md: project instructions for Claude. No leading
+#   slash, so copies in subdirectories are ignored too.
+# - .claude/: settings, local permission allowlists, custom commands and agents,
+#   and the git worktrees Claude creates under .claude/worktrees/.
+# - .mcp.json: project-scoped MCP server configuration for Claude Code.
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+.mcp.json

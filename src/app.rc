@@ -1,0 +1,89 @@
+/*
+ * app.rc - icon, manifest, menu, keyboard shortcuts and version info.
+ *
+ * music_note.ico and app.manifest are found through the include path that
+ * CMakeLists.txt passes to windres (Music_Icons/ and src/).
+ */
+#include <windows.h>
+#include "resource.h"
+#include "version.h"
+
+IDI_APP ICON "music_note.ico"
+
+/* 1 = CREATEPROCESS_MANIFEST_RESOURCE_ID, 24 = RT_MANIFEST. Numeric so it
+ * works with every resource compiler version. */
+1 24 "app.manifest"
+
+IDR_MAINMENU MENU
+BEGIN
+	POPUP "&File"
+	BEGIN
+		MENUITEM "&Open Files...\tCtrl+O", IDM_OPEN_FILES
+		MENUITEM "&Add Files...\tCtrl+Shift+O", IDM_ADD_FILES
+		MENUITEM SEPARATOR
+		MENUITEM "Open &Playlist...\tCtrl+L", IDM_OPEN_PLAYLIST
+		MENUITEM "&Save Playlist As...\tCtrl+Shift+S", IDM_SAVE_PLAYLIST
+		MENUITEM SEPARATOR
+		MENUITEM "&Remove Selected Tracks\tDel", IDM_REMOVE_SELECTED
+		MENUITEM "&Clear Playlist", IDM_CLEAR_PLAYLIST
+		MENUITEM SEPARATOR
+		MENUITEM "E&xit", IDM_EXIT
+	END
+	POPUP "&Playback"
+	BEGIN
+		MENUITEM "&Play/Pause\tCtrl+P", IDM_PLAY_PAUSE
+		MENUITEM "&Stop\tCtrl+S", IDM_STOP
+		MENUITEM "Pre&vious\tCtrl+B", IDM_PREVIOUS
+		MENUITEM "&Next\tCtrl+F", IDM_NEXT
+		MENUITEM SEPARATOR
+		MENUITEM "&Repeat Playlist", IDM_REPEAT
+	END
+	POPUP "&Help"
+	BEGIN
+		MENUITEM "&About Music Player", IDM_ABOUT
+	END
+END
+
+/* The playback shortcuts are the ones Windows Media Player uses. */
+IDR_ACCEL ACCELERATORS
+BEGIN
+	"O", IDM_OPEN_FILES, VIRTKEY, CONTROL
+	"O", IDM_ADD_FILES, VIRTKEY, CONTROL, SHIFT
+	"L", IDM_OPEN_PLAYLIST, VIRTKEY, CONTROL
+	"S", IDM_SAVE_PLAYLIST, VIRTKEY, CONTROL, SHIFT
+	"P", IDM_PLAY_PAUSE, VIRTKEY, CONTROL
+	"S", IDM_STOP, VIRTKEY, CONTROL
+	"B", IDM_PREVIOUS, VIRTKEY, CONTROL
+	"F", IDM_NEXT, VIRTKEY, CONTROL
+	VK_DELETE, IDM_REMOVE_SELECTED, VIRTKEY
+END
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION MP_VERSION_MAJOR, MP_VERSION_MINOR, MP_VERSION_PATCH, 0
+PRODUCTVERSION MP_VERSION_MAJOR, MP_VERSION_MINOR, MP_VERSION_PATCH, 0
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+FILEFLAGS 0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE 0
+BEGIN
+	BLOCK "StringFileInfo"
+	BEGIN
+		/* 0409 = U.S. English, 04B0 = Unicode */
+		BLOCK "040904B0"
+		BEGIN
+			VALUE "CompanyName", "jeffcrone"
+			VALUE "FileDescription", "Music Player"
+			VALUE "FileVersion", MP_VERSION_STRING
+			VALUE "InternalName", "MusicPlayer"
+			VALUE "LegalCopyright", "Copyright (c) 2026 jeffcrone. MIT No Attribution License."
+			VALUE "OriginalFilename", "MusicPlayer.exe"
+			VALUE "ProductName", "Music Player"
+			VALUE "ProductVersion", MP_VERSION_STRING
+		END
+	END
+	BLOCK "VarFileInfo"
+	BEGIN
+		VALUE "Translation", 0x0409, 1200
+	END
+END
