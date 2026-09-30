@@ -10,6 +10,9 @@ Windows program on whatever version of Windows it runs on.
 - Shows the track's **title** and **artist** from the file's metadata. With
   no title in the metadata it shows the **file name**; with no artist, the
   artist line is left blank.
+- A playlist with the **track number**, title, artist and file name. Click a
+  column header to **sort** by it, and **drag** tracks (or use Move Up / Move
+  Down) to put them in any order.
 - **Play / Pause**, **Stop**, **Previous** and **Next**, plus a seek bar.
 - Its own **volume** slider and **mute**, separate from the game's and
   Windows' volume.

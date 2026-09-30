@@ -60,6 +60,29 @@ extension. They're accepted if their content really is MP3, FLAC or WAV.
 play it. Select tracks and press **Delete** to remove them from the playlist.
 The files on disk are not touched. **File > Clear Playlist** empties the list.
 
+### Sorting and reordering
+
+- **Sort:** click the **Track**, **Title**, **Artist** or **File** column
+  header. Click the same header again to reverse the order. The header shows
+  an arrow while the list is in that order. Text sorts the way Explorer sorts
+  it (ignoring case, accented letters beside their plain ones). Tracks with
+  no track number, or no artist, go at the end either way.
+- Sorting keeps tracks that are equal in their current order. So to get each
+  artist's tracks in album order, click **Track** first, then **Artist**.
+- **Drag** tracks up or down with the mouse. Select several first
+  (Ctrl+click, Shift+click) to move them together; they close up into one
+  group where you drop them. Holding them above or below the list scrolls
+  it. Press **Escape** before letting go to put everything back.
+- **File > Move Up** / **Move Down** (**Alt+Up** / **Alt+Down**) move the
+  selected tracks one place. The items are grayed out when there's nowhere
+  to move.
+- Sorting and moving change the playlist's order itself: **Next** and
+  **Previous** follow the new order, the playing track keeps playing, and
+  **Save Playlist As...** saves the order you see. Adding tracks puts them at
+  the end, and any reordering after a sort takes the header's arrow away,
+  since the list is no longer in that order.
+- The **#** column is the place in the playlist, so it can't be sorted by.
+
 ## Playlists
 
 **Opening:** **File > Open Playlist...** (Ctrl+L), the **Open Playlist...**
@@ -109,7 +132,9 @@ At the top of the window:
 - The **volume** slider, labeled with the current level ("Volume 80%"), or
   "Muted".
 
-The playlist columns show the same title and artist, plus the file name.
+The playlist columns show the place in the playlist (**#**), the **track
+number** from the metadata (blank if the file has none), the same title and
+artist, and the file name.
 The playing track is shown in **bold**. The window's title bar reads
 "Title - Artist - Music Player", which is also what you see on the taskbar
 and in Alt+Tab. The status bar shows "Track 3 of 12", "Paused", "Stopped",
@@ -117,11 +142,14 @@ and in Alt+Tab. The status bar shows "Track 3 of 12", "Paused", "Stopped",
 
 Where the metadata comes from:
 
-| Format | Title | Artist |
-| --- | --- | --- |
-| MP3 | ID3v2 `TIT2` (v2.2 `TT2`), else ID3v1 | ID3v2 `TPE1` (v2.2 `TP1`), else ID3v1, else album artist `TPE2` |
-| FLAC | Vorbis comment `TITLE` | `ARTIST`, else `ALBUMARTIST` / `ALBUM ARTIST` |
-| WAV | `id3 ` chunk (as MP3), else RIFF INFO `INAM` | `id3 ` chunk, else RIFF INFO `IART` |
+| Format | Title | Artist | Track number |
+| --- | --- | --- | --- |
+| MP3 | ID3v2 `TIT2` (v2.2 `TT2`), else ID3v1 | ID3v2 `TPE1` (v2.2 `TP1`), else ID3v1, else album artist `TPE2` | ID3v2 `TRCK` (v2.2 `TRK`), else ID3v1.1's track byte |
+| FLAC | Vorbis comment `TITLE` | `ARTIST`, else `ALBUMARTIST` / `ALBUM ARTIST` | `TRACKNUMBER` (or the older `TRACK`) |
+| WAV | `id3 ` chunk (as MP3), else RIFF INFO `INAM` | `id3 ` chunk, else RIFF INFO `IART` | `id3 ` chunk, else RIFF INFO `ITRK` |
+
+Track numbers written as "7/12" (track 7 of 12) show as 7. A value that
+isn't a plain number, such as "A1" from a vinyl rip, is left blank.
 
 A FLAC file with an ID3v2 tag in front, which some taggers write, has that
 tag read first.
@@ -145,6 +173,8 @@ The playback shortcuts are the same as Windows Media Player's.
 | Save playlist | | File > Save Playlist As... | Ctrl+Shift+S |
 | Play the selected track | double-click it | | Enter |
 | Remove selected tracks | | File > Remove Selected Tracks | Delete |
+| Move selected tracks up / down | drag them | File > Move Up / Move Down | Alt+Up / Alt+Down |
+| Sort the playlist | click a column header (again to reverse) | | |
 | Keyboard media keys | | | Play/Pause, Stop, Next, Previous (when the player window is active) |
 
 How playback moves along:

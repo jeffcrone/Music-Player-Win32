@@ -1,5 +1,5 @@
 /*
- * tags.c - title/artist extraction. See tags.h for what is supported.
+ * tags.c - title/artist/track extraction. See tags.h for what is supported.
  *
  * Every size field read from a file is treated as hostile: it is checked
  * against what is actually left before it is used, so a truncated or
@@ -10,6 +10,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <windows.h> /* wsprintfW */
 
 #include "text.h"
 
@@ -36,6 +37,9 @@ typedef struct {
 	wchar_t title[MP_TAG_MAX];
 	wchar_t artist[MP_TAG_MAX];
 	wchar_t album_artist[MP_TAG_MAX];
+	/* Kept as text until the end, so that every source's value can be
+	 * checked with mp_tags_parse_track and a bad one passed over. */
+	wchar_t track[MP_TAG_MAX];
 } Slots;
 
 /* First value wins: a slot that already holds something is left alone. That
@@ -159,10 +163,12 @@ static wchar_t *id3_slot_for(Slots *slots, const char *id, int major)
 		if (memcmp(id, "TT2", 3) == 0) return slots->title;
 		if (memcmp(id, "TP1", 3) == 0) return slots->artist;
 		if (memcmp(id, "TP2", 3) == 0) return slots->album_artist;
+		if (memcmp(id, "TRK", 3) == 0) return slots->track;
 	} else {
 		if (memcmp(id, "TIT2", 4) == 0) return slots->title;
 		if (memcmp(id, "TPE1", 4) == 0) return slots->artist;
 		if (memcmp(id, "TPE2", 4) == 0) return slots->album_artist;
+		if (memcmp(id, "TRCK", 4) == 0) return slots->track;
 	}
 	return NULL;
 }
@@ -359,6 +365,13 @@ static void id3v1_parse(MpStream *s, Slots *slots)
 	offer(slots->title, text);
 	mp_cp1252_decode(t + 33, 30, text, MP_TAG_MAX);
 	offer(slots->artist, text);
+	/* ID3v1.1: the comment field (bytes 97..126) gave up its last byte for
+	 * the track number, marked by a zero byte before it. In plain v1.0 a
+	 * 30-character comment fills byte 125, so no zero, so no track. */
+	if (t[125] == 0 && t[126] != 0) {
+		wsprintfW(text, L"%u", (unsigned)t[126]);
+		offer(slots->track, text);
+	}
 }
 
 /* ---- FLAC / Vorbis comments --------------------------------------------- */
@@ -413,6 +426,9 @@ static void vorbis_comments(const uint8_t *d, size_t n, Slots *slots)
 		else if (field_is(field, eq, "ALBUMARTIST") || field_is(field, eq, "ALBUM ARTIST") ||
 			field_is(field, eq, "ALBUM_ARTIST"))
 			offer(slots->album_artist, text);
+		/* TRACKNUMBER is the standard name; a few old taggers wrote TRACK. */
+		else if (field_is(field, eq, "TRACKNUMBER") || field_is(field, eq, "TRACK"))
+			offer(slots->track, text);
 	}
 }
 
@@ -468,6 +484,8 @@ static void riff_info(MpStream *s, int64_t off, int64_t end, Slots *slots)
 			slot = slots->title;
 		else if (memcmp(ch, "IART", 4) == 0)
 			slot = slots->artist;
+		else if (memcmp(ch, "ITRK", 4) == 0)
+			slot = slots->track;
 		if (slot != NULL) {
 			size_t n = len < FIELD_READ_MAX ? len : FIELD_READ_MAX;
 			if ((int64_t)n > end - off - 8)
@@ -541,6 +559,7 @@ int mp_tags_read_stream(MpStream *s, MpTags *tags)
 
 	tags->title[0] = 0;
 	tags->artist[0] = 0;
+	tags->track = 0;
 	if (s == NULL)
 		return 0;
 	/* Slots are ~1.5 KB each; keep them off the (small, on XP) stack. */
@@ -579,8 +598,10 @@ int mp_tags_read_stream(MpStream *s, MpTags *tags)
 		if (all[i].album_artist[0] != 0)
 			mp_wcopy(tags->artist, MP_TAG_MAX, all[i].album_artist);
 	}
+	for (i = 0; i < n && tags->track == 0; i++)
+		tags->track = mp_tags_parse_track(all[i].track);
 	free(all);
-	return tags->title[0] != 0 || tags->artist[0] != 0;
+	return tags->title[0] != 0 || tags->artist[0] != 0 || tags->track != 0;
 }
 
 int mp_tags_read_file(const wchar_t *path, MpTags *tags)
@@ -589,10 +610,37 @@ int mp_tags_read_file(const wchar_t *path, MpTags *tags)
 	int found;
 	tags->title[0] = 0;
 	tags->artist[0] = 0;
+	tags->track = 0;
 	s = mp_stream_open_file(path, NULL);
 	if (s == NULL)
 		return 0;
 	found = mp_tags_read_stream(s, tags);
 	mp_stream_close(s);
 	return found;
+}
+
+unsigned mp_tags_parse_track(const wchar_t *text)
+{
+	unsigned n = 0;
+	int digits = 0;
+	if (text == NULL)
+		return 0;
+	while (*text == L' ' || *text == L'\t')
+		text++;
+	for (; *text >= L'0' && *text <= L'9'; text++) {
+		n = n * 10 + (unsigned)(*text - L'0');
+		/* Stop before the value can overflow; it is garbage by now. */
+		if (n > MP_TRACK_MAX)
+			return 0;
+		digits++;
+	}
+	if (digits == 0)
+		return 0;
+	while (*text == L' ' || *text == L'\t')
+		text++;
+	/* "7/12": whatever follows the slash is the track count, not ours to
+	 * judge. Anything else after the number means it was not one. */
+	if (*text != 0 && *text != L'/')
+		return 0;
+	return n;
 }

@@ -884,6 +884,241 @@ static void from_disk(void)
 	buf_free(&file);
 }
 
+/* ---- Track numbers ------------------------------------------------------ */
+
+static void parse_track(void)
+{
+	CHECK_INT(mp_tags_parse_track(L"7"), 7);
+	CHECK_INT(mp_tags_parse_track(L"07"), 7);
+	CHECK_INT(mp_tags_parse_track(L"7/12"), 7);
+	CHECK_INT(mp_tags_parse_track(L"07/12"), 7);
+	CHECK_INT(mp_tags_parse_track(L"7/"), 7);
+	CHECK_INT(mp_tags_parse_track(L"  7 "), 7);
+	CHECK_INT(mp_tags_parse_track(L"\t7 / 12"), 7);
+	CHECK_INT(mp_tags_parse_track(L"1"), 1);
+	CHECK_INT(mp_tags_parse_track(L"9999"), 9999);
+	CHECK_INT(mp_tags_parse_track(L"000000000000000000003"), 3); /* zeros never overflow */
+	/* Not track numbers. */
+	CHECK_INT(mp_tags_parse_track(L""), 0);
+	CHECK_INT(mp_tags_parse_track(L"   "), 0);
+	CHECK_INT(mp_tags_parse_track(L"0"), 0);
+	CHECK_INT(mp_tags_parse_track(L"0/12"), 0);
+	CHECK_INT(mp_tags_parse_track(L"/12"), 0);
+	CHECK_INT(mp_tags_parse_track(L"A1"), 0);   /* vinyl side A, track 1 */
+	CHECK_INT(mp_tags_parse_track(L"1A"), 0);
+	CHECK_INT(mp_tags_parse_track(L"7 of 12"), 0);
+	CHECK_INT(mp_tags_parse_track(L"-3"), 0);
+	CHECK_INT(mp_tags_parse_track(L"+3"), 0);
+	CHECK_INT(mp_tags_parse_track(L"3.5"), 0);
+	CHECK_INT(mp_tags_parse_track(L"10000"), 0); /* above MP_TRACK_MAX */
+	CHECK_INT(mp_tags_parse_track(L"99999999999999999999"), 0); /* no wrap-around */
+	CHECK_INT(mp_tags_parse_track(L"\xFF17"), 0); /* a fullwidth 7 is not ASCII */
+	CHECK_INT(mp_tags_parse_track(NULL), 0);
+}
+
+static void track_from_id3v2(void)
+{
+	Buf f, file;
+	MpTags t;
+	static const uint8_t utf16_track[] = { 0xFF, 0xFE, '1', 0, '2', 0, '/', 0, '2', 0, '0', 0 };
+
+	/* v2.3 "n/total", with a title so the rest still reads normally. */
+	buf_init(&f);
+	buf_init(&file);
+	id3_frame(&f, 3, "TIT2", 0, 0, "Song", 4);
+	id3_frame(&f, 3, "TRCK", 0, 0, "7/12", 4);
+	mp3_with_tag(&file, 3, 0, &f);
+	CHECK(read_tags(&file, &t));
+	CHECK_INT(t.track, 7);
+	CHECK_WSTR(t.title, L"Song");
+	buf_free(&f);
+	buf_free(&file);
+
+	/* v2.4, UTF-16 with a BOM. */
+	buf_init(&f);
+	buf_init(&file);
+	id3_frame(&f, 4, "TRCK", 0, 1, utf16_track, sizeof(utf16_track));
+	mp3_with_tag(&file, 4, 0, &f);
+	read_tags(&file, &t);
+	CHECK_INT(t.track, 12);
+	buf_free(&f);
+	buf_free(&file);
+
+	/* v2.2's three-letter frame. */
+	buf_init(&f);
+	buf_init(&file);
+	id3_frame(&f, 2, "TRK", 0, 0, "03", 2);
+	mp3_with_tag(&file, 2, 0, &f);
+	read_tags(&file, &t);
+	CHECK_INT(t.track, 3);
+	buf_free(&f);
+	buf_free(&file);
+
+	/* A track number and nothing else still counts as "found". */
+	buf_init(&f);
+	buf_init(&file);
+	id3_frame(&f, 3, "TRCK", 0, 0, "5", 1);
+	mp3_with_tag(&file, 3, 0, &f);
+	CHECK(read_tags(&file, &t));
+	CHECK_INT(t.track, 5);
+	CHECK_WSTR(t.title, L"");
+	buf_free(&f);
+	buf_free(&file);
+
+	/* No TRCK: 0. */
+	buf_init(&f);
+	buf_init(&file);
+	id3_frame(&f, 3, "TIT2", 0, 0, "Song", 4);
+	mp3_with_tag(&file, 3, 0, &f);
+	read_tags(&file, &t);
+	CHECK_INT(t.track, 0);
+	buf_free(&f);
+	buf_free(&file);
+}
+
+/* Sets the ID3v1.1 track byte in the tag id3v1_tag just appended. The tag
+ * is the last 128 bytes; bytes 125 and 126 of it are the marker and the
+ * track. */
+static void set_v1_track(Buf *file, uint8_t marker, uint8_t track)
+{
+	file->data[file->len - 128 + 125] = marker;
+	file->data[file->len - 128 + 126] = track;
+}
+
+static void track_from_id3v1(void)
+{
+	Buf f, file;
+	MpTags t;
+
+	/* v1.1: a zero byte then the track. */
+	buf_init(&file);
+	mp3_silence(&file, 2);
+	id3v1_tag(&file, "Title", "Artist");
+	set_v1_track(&file, 0, 9);
+	read_tags(&file, &t);
+	CHECK_INT(t.track, 9);
+	buf_free(&file);
+
+	/* v1.0 with a comment running to the end of its field: byte 125 is
+	 * text, so byte 126 is text too, not a track. */
+	buf_init(&file);
+	mp3_silence(&file, 2);
+	id3v1_tag(&file, "Title", "Artist");
+	set_v1_track(&file, 'x', 'y');
+	read_tags(&file, &t);
+	CHECK_INT(t.track, 0);
+	buf_free(&file);
+
+	/* v1.1 marker with a zero track byte: no track. */
+	buf_init(&file);
+	mp3_silence(&file, 2);
+	id3v1_tag(&file, "Title", "Artist");
+	set_v1_track(&file, 0, 0);
+	read_tags(&file, &t);
+	CHECK_INT(t.track, 0);
+	buf_free(&file);
+
+	/* The highest a byte can hold. */
+	buf_init(&file);
+	mp3_silence(&file, 2);
+	id3v1_tag(&file, "Title", "Artist");
+	set_v1_track(&file, 0, 255);
+	read_tags(&file, &t);
+	CHECK_INT(t.track, 255);
+	buf_free(&file);
+
+	/* A v2 TRCK beats v1... */
+	buf_init(&f);
+	buf_init(&file);
+	id3_frame(&f, 3, "TRCK", 0, 0, "4", 1);
+	id3_tag(&file, 3, 0, &f, 0);
+	mp3_silence(&file, 2);
+	id3v1_tag(&file, "Title", "Artist");
+	set_v1_track(&file, 0, 9);
+	read_tags(&file, &t);
+	CHECK_INT(t.track, 4);
+	buf_free(&f);
+	buf_free(&file);
+
+	/* ...but a v2 TRCK that is not a number does not hide v1's. */
+	buf_init(&f);
+	buf_init(&file);
+	id3_frame(&f, 3, "TRCK", 0, 0, "A1", 2);
+	id3_tag(&file, 3, 0, &f, 0);
+	mp3_silence(&file, 2);
+	id3v1_tag(&file, "Title", "Artist");
+	set_v1_track(&file, 0, 9);
+	read_tags(&file, &t);
+	CHECK_INT(t.track, 9);
+	buf_free(&f);
+	buf_free(&file);
+}
+
+static void track_from_flac(void)
+{
+	Buf file;
+	MpTags t;
+	static const char *const standard[] = { "TITLE=T", "TRACKNUMBER=4/10" };
+	static const char *const lower[] = { "tracknumber=06" };
+	static const char *const old_name[] = { "TRACK=8" };
+	static const char *const bad_then_good[] = { "TRACKNUMBER=", "TRACKNUMBER=11" };
+	static const char *const not_a_number[] = { "TRACKNUMBER=Side A" };
+
+	buf_init(&file);
+	flac_with_comment(&file, standard, 2);
+	read_tags(&file, &t);
+	CHECK_INT(t.track, 4);
+	buf_free(&file);
+
+	buf_init(&file);
+	flac_with_comment(&file, lower, 1);
+	CHECK(read_tags(&file, &t));
+	CHECK_INT(t.track, 6);
+	buf_free(&file);
+
+	buf_init(&file);
+	flac_with_comment(&file, old_name, 1);
+	read_tags(&file, &t);
+	CHECK_INT(t.track, 8);
+	buf_free(&file);
+
+	/* An empty value does not block a later real one. */
+	buf_init(&file);
+	flac_with_comment(&file, bad_then_good, 2);
+	read_tags(&file, &t);
+	CHECK_INT(t.track, 11);
+	buf_free(&file);
+
+	buf_init(&file);
+	flac_with_comment(&file, not_a_number, 1);
+	CHECK(!read_tags(&file, &t));
+	CHECK_INT(t.track, 0);
+	buf_free(&file);
+}
+
+static void track_from_wav(void)
+{
+	Buf list, extra, file;
+	MpTags t;
+	static const int16_t pcm[4] = { 0 };
+
+	/* RIFF INFO ITRK, NUL-terminated like the other INFO strings. */
+	buf_init(&list);
+	buf_init(&extra);
+	buf_init(&file);
+	buf_str(&list, "INFO");
+	riff_chunk(&list, "INAM", "Name", 5);
+	riff_chunk(&list, "ITRK", "11", 3);
+	riff_chunk(&extra, "LIST", list.data, list.len);
+	wav_file(&file, 1, 2, 44100, 16, pcm, sizeof(pcm), &extra);
+	read_tags(&file, &t);
+	CHECK_WSTR(t.title, L"Name");
+	CHECK_INT(t.track, 11);
+	buf_free(&list);
+	buf_free(&extra);
+	buf_free(&file);
+}
+
 int suite_tags(void)
 {
 	id3v23_latin1();
@@ -908,5 +1143,10 @@ int suite_tags(void)
 	wav_id3_chunk();
 	wav_corrupt();
 	from_disk();
+	parse_track();
+	track_from_id3v2();
+	track_from_id3v1();
+	track_from_flac();
+	track_from_wav();
 	return 0;
 }

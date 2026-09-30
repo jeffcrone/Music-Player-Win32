@@ -40,9 +40,9 @@ that uses it. There are no binary fixture files.
 | CTest name | Source | What it covers |
 | --- | --- | --- |
 | `text` | `tests/test_text.c` | UTF-8 decoding and validation (overlong forms, encoded surrogates, truncated sequences, values above U+10FFFF), Windows-1252 including its 0x80 to 0x9F range, UTF-16 in both byte orders with surrogate pairs and unpaired surrogates, UTF-8 encoding, truncation that never splits a character, trimming, ASCII-only case-insensitive comparison. |
-| `tags` | `tests/test_tags.c` | Title/artist extraction. ID3v2.2/2.3/2.4 in all four text encodings, with or without BOMs. Extended headers. Tag-level and frame-level unsynchronization. The data length indicator and grouping bytes. Compressed and encrypted frames skipped. iTunes' non-syncsafe v2.4 sizes. Footers and stacked tags. Cover art skipped. ID3v1 and v1-vs-v2 precedence. Album artist fallback. FLAC Vorbis comments (case-insensitive keys, odd fields, corrupt counts, ID3 in front, padding blocks). WAV `LIST/INFO` (UTF-8 vs 1252, odd-length padding) and `id3 ` chunks. Truncated, oversized and garbage structures, which must never crash or read out of bounds. |
+| `tags` | `tests/test_tags.c` | Title/artist/track number extraction. ID3v2.2/2.3/2.4 in all four text encodings, with or without BOMs. Extended headers. Tag-level and frame-level unsynchronization. The data length indicator and grouping bytes. Compressed and encrypted frames skipped. iTunes' non-syncsafe v2.4 sizes. Footers and stacked tags. Cover art skipped. ID3v1 and v1-vs-v2 precedence. Album artist fallback. FLAC Vorbis comments (case-insensitive keys, odd fields, corrupt counts, ID3 in front, padding blocks). WAV `LIST/INFO` (UTF-8 vs 1252, odd-length padding) and `id3 ` chunks. Track numbers from `TRCK`/`TRK`, ID3v1.1's track byte (and v1.0 comments that must not be mistaken for one), `TRACKNUMBER`/`TRACK` and `ITRK`, with a garbled value in one tag not hiding a good one in another, and the number parser itself ("07/12", "A1", overflow, fullwidth digits). Truncated, oversized and garbage structures, which must never crash or read out of bounds. |
 | `track` | `tests/test_track.c` | The display rules (title falls back to the file name, a missing artist stays empty, whitespace counts as missing), file-name extraction, and time formatting from `0:00` up to `1193:02:47`. |
-| `playlist` | `tests/test_playlist.c` | M3U parsing (directives, blank lines, LF/CRLF/CR, padding). Relative, rooted, absolute, UNC and forward-slash paths. `file://` URLs with %-escapes, UNC hosts and the legacy `C\|` form. Stream URLs skipped. UTF-8/UTF-16/ANSI detection. PLS numbering and ordering. Previous/Next stepping and wrap-around. Removing tracks while one is playing. `.m3u8` saving with relative paths and a round trip back through the parser. |
+| `playlist` | `tests/test_playlist.c` | M3U parsing (directives, blank lines, LF/CRLF/CR, padding). Relative, rooted, absolute, UNC and forward-slash paths. `file://` URLs with %-escapes, UNC hosts and the legacy `C\|` form. Stream URLs skipped. UTF-8/UTF-16/ANSI detection. PLS numbering and ordering. Previous/Next stepping and wrap-around. Removing tracks while one is playing. Sorting by track, title, artist and file name, both directions: language-aware and case-insensitive, blanks last either way, stable (including the track-then-artist use of that), the playing track followed, the old-to-new index map, and a 1,000-entry list. Moving a selection as a block to any position (top, end, middle, from both sides, no-ops, bad arguments refused). Move Up/Down: passing unselected neighbors, blocks stuck at either end, selection flags following the entries. `.m3u8` saving with relative paths and a round trip back through the parser. |
 | `decoder` | `tests/test_decoder.c` | Format detection by content (and by extension only as a fallback). Exact sample-for-sample decoding of WAV (8/16/24-bit, float, 6-channel downmix) and FLAC (stereo and mono, multiple frames, seeking), with MP3 checked as known silence (length, seeking, tags at both ends). The workaround for dr_flac's ID3-in-front bug. Error messages for missing, empty, corrupt and unsupported files. |
 | `player` | `tests/test_player.c` | Real playback through waveOut: load, play, pause (position holds), seek while paused, play to the end (exactly one end-of-track notice), replay after the end, stop, replace, unload, and shutting down while playing. The volume: starts at 100, is clamped, survives loads and unloads, and can change mid-play. [Needs a sound device.](#the-playback-tests) |
 | `volume` | `tests/test_volume.c` | The software volume. The slider-to-gain curve (exact at 0% and 100%, strictly rising, clamped out of range), and sample scaling: bit-exact at full volume, silence at zero, symmetric rounding for negative samples, no overflow at the 16-bit extremes, and only the given samples touched. Needs no sound device, so it runs on CI too. |
@@ -222,28 +222,36 @@ characters in its tags.
 10. Drag files and a playlist from Explorer onto the window.
 11. Select two tracks and press **Delete**. Delete the playing track: playback
     stops cleanly.
-12. Rename a file that's in the playlist, then play it. The status bar
+12. Click the **Track**, **Title**, **Artist** and **File** headers: the list
+    sorts, the header shows an arrow, and a second click reverses it. The
+    playing track stays bold and keeps playing, and Next follows the new
+    order. Drag a track, then several selected tracks, to a new place,
+    including past the bottom of a long list (it scrolls). Start another
+    drag and press Escape before letting go: everything goes back. Select a
+    track and use Alt+Up / Alt+Down, and check that File > Move Up is grayed
+    at the top of the list.
+13. Rename a file that's in the playlist, then play it. The status bar
     explains it can't be found. With Next, it's skipped.
-13. Resize the window small and large. Controls stay tidy, and long titles
+14. Resize the window small and large. Controls stay tidy, and long titles
     end in "...".
-14. Drag the **volume** slider while music plays: the level follows within
+15. Drag the **volume** slider while music plays: the level follows within
     a moment and the label shows the percentage. F9/F10 step it by 5%. F8
     mutes ("Muted", and Playback > Mute is checked), and F8 again, or
     moving the slider, brings the sound back at the slider's level.
-15. Previous, Play, Stop and Next show their symbols left of the text, and
+16. Previous, Play, Stop and Next show their symbols left of the text, and
     Play's symbol changes to a pause symbol while playing. The Playback
     menu shows the same symbols beside Play/Pause, Stop, Previous and Next
     (on Vista and later; on XP that menu is text only), and its Play/Pause
     symbol changes along with the button's. Switch Windows
     to a high contrast theme with the player open: the symbols change
     color along with the captions.
-16. Tab through the controls. Ctrl+P, Ctrl+S, Ctrl+B, Ctrl+F and the media keys
+17. Tab through the controls. Ctrl+P, Ctrl+S, Ctrl+B, Ctrl+F and the media keys
     work while the window is active.
-17. Play music with World of Warcraft (or any game) running in windowed
+18. Play music with World of Warcraft (or any game) running in windowed
     mode. Alt+Tab between them. Turning the player's volume slider down
     must not change the game's volume (check this on XP too, where a
     shared device volume would be the telltale bug).
-18. At 150% display scaling (Settings > Display > Scale), the window is
+19. At 150% display scaling (Settings > Display > Scale), the window is
     sharp and proportioned, not blurry or cramped, and so are the button
     symbols.
 

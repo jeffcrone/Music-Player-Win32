@@ -236,10 +236,10 @@ static void list_and_navigation(void)
 	CHECK(mp_playlist_step(&pl, MP_NONE, -1, 1) == MP_NONE);
 	CHECK(mp_playlist_step(&pl, 0, 1, 1) == MP_NONE);
 
-	CHECK(mp_playlist_add(&pl, L"C:\\a.mp3", L"A", L"Artist A"));
+	CHECK(mp_playlist_add(&pl, L"C:\\a.mp3", L"A", L"Artist A", 0));
 	/* NULL title/artist are stored as empty strings. */
-	CHECK(mp_playlist_add(&pl, L"C:\\b.mp3", NULL, NULL));
-	CHECK(mp_playlist_add(&pl, L"C:\\c.mp3", L"C", L""));
+	CHECK(mp_playlist_add(&pl, L"C:\\b.mp3", NULL, NULL, 0));
+	CHECK(mp_playlist_add(&pl, L"C:\\c.mp3", L"C", L"", 0));
 	CHECK_INT(pl.count, 3);
 	CHECK_WSTR(pl.items[1].title, L"");
 	CHECK_WSTR(pl.items[1].artist, L"");
@@ -269,7 +269,7 @@ static void list_and_navigation(void)
 	CHECK_INT(pl.count, 1);
 	CHECK(!mp_playlist_remove(&pl, 5)); /* out of range */
 	pl.current = 0;
-	CHECK(mp_playlist_add(&pl, L"C:\\d.mp3", L"D", L""));
+	CHECK(mp_playlist_add(&pl, L"C:\\d.mp3", L"D", L"", 0));
 	CHECK(mp_playlist_remove(&pl, 1)); /* after current: unchanged */
 	CHECK_INT(pl.current, 0);
 
@@ -284,11 +284,343 @@ static void list_and_navigation(void)
 	{
 		int i;
 		for (i = 0; i < 100; i++)
-			CHECK(mp_playlist_add(&pl, L"C:\\x.mp3", L"x", L""));
+			CHECK(mp_playlist_add(&pl, L"C:\\x.mp3", L"x", L"", 0));
 		CHECK_INT(pl.count, 100);
 	}
 	mp_playlist_free(&pl);
 	CHECK_INT(pl.count, 0);
+}
+
+/* ---- Reordering --------------------------------------------------------- */
+
+/* The list's order, as the first letter of each title: "BAC" means B, A, C. */
+static int order_is(const MpPlaylist *pl, const wchar_t *letters)
+{
+	size_t i;
+	if (wcslen(letters) != pl->count)
+		return 0;
+	for (i = 0; i < pl->count; i++) {
+		if (pl->items[i].title[0] != letters[i])
+			return 0;
+	}
+	return 1;
+}
+
+/* Six tracks, A to F, with nothing else to them. */
+static void six(MpPlaylist *pl)
+{
+	static const wchar_t *const names[] = { L"A", L"B", L"C", L"D", L"E", L"F" };
+	int i;
+	mp_playlist_init(pl);
+	for (i = 0; i < 6; i++)
+		mp_playlist_add(pl, L"C:\\x.mp3", names[i], L"", 0);
+}
+
+/*
+ * Five tracks for sorting, identified by their file names a..e (the titles
+ * are what gets sorted, so they cannot identify the entries):
+ *   c.mp3   "banana"  artist "Zed"    track 3
+ *   a.mp3   "Apple"   no artist       no track
+ *   B.flac  "cherry"  artist "alpha"  track 1   (in another folder)
+ *   d.wav   "apple"   artist "Alpha"  track 2   (same title as a, but case)
+ *   e.mp3   "Eclair"  artist "zed"    no track  (with an accented E)
+ */
+static void five(MpPlaylist *pl)
+{
+	mp_playlist_init(pl);
+	mp_playlist_add(pl, L"C:\\m\\c.mp3", L"banana", L"Zed", 3);
+	mp_playlist_add(pl, L"C:\\m\\a.mp3", L"Apple", L"", 0);
+	mp_playlist_add(pl, L"D:\\other\\B.flac", L"cherry", L"alpha", 1);
+	mp_playlist_add(pl, L"C:\\m\\d.wav", L"apple", L"Alpha", 2);
+	mp_playlist_add(pl, L"C:\\m\\e.mp3", L"\x00C9" L"clair", L"zed", 0);
+}
+
+/* The order as the file names' first letters, lowercased: "cabde". */
+static int files_are(const MpPlaylist *pl, const char *letters)
+{
+	size_t i;
+	if (strlen(letters) != pl->count)
+		return 0;
+	for (i = 0; i < pl->count; i++) {
+		const wchar_t *p = pl->items[i].path, *base = p;
+		for (; *p != 0; p++) {
+			if (*p == L'\\')
+				base = p + 1;
+		}
+		if ((char)(*base | 0x20) != letters[i])
+			return 0;
+	}
+	return 1;
+}
+
+static void sorting(void)
+{
+	MpPlaylist pl;
+	size_t new_index[5];
+
+	/* Title: case and accents are ignored the way Explorer ignores them,
+	 * so Eclair (with its accent) comes after cherry, not after Z. "Apple"
+	 * and "apple" tie, and the tie keeps the existing order (a before d). */
+	five(&pl);
+	pl.current = 0; /* banana is playing */
+	CHECK(mp_playlist_sort(&pl, MP_SORT_TITLE, 0, new_index));
+	CHECK(files_are(&pl, "adcbe"));
+	/* current follows banana to its new place... */
+	CHECK_INT(pl.current, 2);
+	/* ...and new_index says where every old entry went. */
+	CHECK_INT(new_index[0], 2);
+	CHECK_INT(new_index[1], 0);
+	CHECK_INT(new_index[2], 3);
+	CHECK_INT(new_index[3], 1);
+	CHECK_INT(new_index[4], 4);
+	mp_playlist_free(&pl);
+
+	/* Descending reverses the order, but ties still keep their existing
+	 * order (a before d): a stable sort is stable in both directions. */
+	five(&pl);
+	CHECK(mp_playlist_sort(&pl, MP_SORT_TITLE, 1, NULL));
+	CHECK(files_are(&pl, "ebcad"));
+	CHECK(pl.current == MP_NONE); /* nothing playing stays nothing */
+	mp_playlist_free(&pl);
+
+	/* Track number: blanks go last, in both directions. */
+	five(&pl);
+	CHECK(mp_playlist_sort(&pl, MP_SORT_TRACK, 0, NULL));
+	CHECK(files_are(&pl, "bdcae"));
+	mp_playlist_free(&pl);
+	five(&pl);
+	CHECK(mp_playlist_sort(&pl, MP_SORT_TRACK, 1, NULL));
+	CHECK(files_are(&pl, "cdbae"));
+	mp_playlist_free(&pl);
+
+	/* Artist: case-insensitive ties keep their order; no artist goes last,
+	 * in both directions. */
+	five(&pl);
+	CHECK(mp_playlist_sort(&pl, MP_SORT_ARTIST, 0, NULL));
+	CHECK(files_are(&pl, "bdcea"));
+	mp_playlist_free(&pl);
+	five(&pl);
+	CHECK(mp_playlist_sort(&pl, MP_SORT_ARTIST, 1, NULL));
+	CHECK(files_are(&pl, "cebda"));
+	mp_playlist_free(&pl);
+
+	/* File: the file name only, not the folder (B.flac is on D:) and not
+	 * the case. */
+	five(&pl);
+	pl.current = 4;
+	CHECK(mp_playlist_sort(&pl, MP_SORT_FILE, 0, NULL));
+	CHECK(files_are(&pl, "abcde"));
+	CHECK_INT(pl.current, 4);
+	mp_playlist_free(&pl);
+
+	/* Stability put to use: by track, then by artist, gives each artist's
+	 * tracks in track order. */
+	mp_playlist_init(&pl);
+	mp_playlist_add(&pl, L"C:\\3.mp3", L"X3", L"Xenon", 3);
+	mp_playlist_add(&pl, L"C:\\1.mp3", L"X1", L"Xenon", 1);
+	mp_playlist_add(&pl, L"C:\\5.mp3", L"A5", L"Argon", 5);
+	mp_playlist_add(&pl, L"C:\\2.mp3", L"X2", L"Xenon", 2);
+	CHECK(mp_playlist_sort(&pl, MP_SORT_TRACK, 0, NULL));
+	CHECK(mp_playlist_sort(&pl, MP_SORT_ARTIST, 0, NULL));
+	CHECK_WSTR(pl.items[0].title, L"A5");
+	CHECK_WSTR(pl.items[1].title, L"X1");
+	CHECK_WSTR(pl.items[2].title, L"X2");
+	CHECK_WSTR(pl.items[3].title, L"X3");
+	mp_playlist_free(&pl);
+
+	/* Empty and single-entry lists are fine. */
+	mp_playlist_init(&pl);
+	CHECK(mp_playlist_sort(&pl, MP_SORT_TITLE, 0, NULL));
+	mp_playlist_add(&pl, L"C:\\only.mp3", L"Only", L"", 0);
+	pl.current = 0;
+	CHECK(mp_playlist_sort(&pl, MP_SORT_ARTIST, 1, new_index));
+	CHECK_INT(new_index[0], 0);
+	CHECK_INT(pl.current, 0);
+	mp_playlist_free(&pl);
+
+	/* A big list, sorted and reverse-sorted: the merge sort's recursion
+	 * and every element ends up in order. */
+	{
+		int i, ok = 1;
+		mp_playlist_init(&pl);
+		for (i = 0; i < 1000; i++) {
+			wchar_t title[5];
+			/* 7919 is prime, so this visits 0..999 in a scrambled order.
+			 * Formatted by hand: swprintf's signature differs between the
+			 * C runtimes the two toolchains use. */
+			int v = (i * 7919) % 1000;
+			title[0] = L'0';
+			title[1] = (wchar_t)(L'0' + v / 100);
+			title[2] = (wchar_t)(L'0' + v / 10 % 10);
+			title[3] = (wchar_t)(L'0' + v % 10);
+			title[4] = 0;
+			mp_playlist_add(&pl, L"C:\\x.mp3", title, L"", (unsigned)((i * 7919) % 1000) + 1);
+		}
+		CHECK(mp_playlist_sort(&pl, MP_SORT_TITLE, 0, NULL));
+		for (i = 1; i < 1000; i++)
+			ok &= wcscmp(pl.items[i - 1].title, pl.items[i].title) < 0;
+		CHECK(ok);
+		CHECK(mp_playlist_sort(&pl, MP_SORT_TRACK, 1, NULL));
+		for (i = 1; i < 1000; i++)
+			ok &= pl.items[i - 1].track > pl.items[i].track;
+		CHECK(ok);
+		mp_playlist_free(&pl);
+	}
+}
+
+static void move_block(void)
+{
+	MpPlaylist pl;
+	size_t idx[6];
+
+	/* Two apart, gathered at the top, keeping their order; D was playing
+	 * and stays the playing track. */
+	six(&pl);
+	pl.current = 3;
+	idx[0] = 1;
+	idx[1] = 3;
+	CHECK(mp_playlist_move_block(&pl, idx, 2, 0));
+	CHECK(order_is(&pl, L"BDACEF"));
+	CHECK_INT(pl.current, 1);
+	mp_playlist_free(&pl);
+
+	/* To the very end (to = count - n). */
+	six(&pl);
+	pl.current = 1; /* B, which is not moving, still moves up one */
+	idx[0] = 0;
+	idx[1] = 2;
+	CHECK(mp_playlist_move_block(&pl, idx, 2, 4));
+	CHECK(order_is(&pl, L"BDEFAC"));
+	CHECK_INT(pl.current, 0);
+	mp_playlist_free(&pl);
+
+	/* Into the middle, from both sides of it. */
+	six(&pl);
+	idx[0] = 0;
+	idx[1] = 5;
+	CHECK(mp_playlist_move_block(&pl, idx, 2, 2));
+	CHECK(order_is(&pl, L"BCAFDE"));
+	mp_playlist_free(&pl);
+
+	/* One entry down by one, the smallest drag. */
+	six(&pl);
+	idx[0] = 2;
+	CHECK(mp_playlist_move_block(&pl, idx, 1, 3));
+	CHECK(order_is(&pl, L"ABDCEF"));
+	mp_playlist_free(&pl);
+
+	/* Already there, and everything at once: no change. */
+	six(&pl);
+	idx[0] = 2;
+	idx[1] = 3;
+	CHECK(mp_playlist_move_block(&pl, idx, 2, 2));
+	CHECK(order_is(&pl, L"ABCDEF"));
+	{
+		int i;
+		for (i = 0; i < 6; i++)
+			idx[i] = (size_t)i;
+	}
+	CHECK(mp_playlist_move_block(&pl, idx, 6, 0));
+	CHECK(order_is(&pl, L"ABCDEF"));
+	mp_playlist_free(&pl);
+
+	/* Bad arguments are refused and change nothing. */
+	six(&pl);
+	pl.current = 2;
+	idx[0] = 3;
+	idx[1] = 1; /* not increasing */
+	CHECK(!mp_playlist_move_block(&pl, idx, 2, 0));
+	idx[0] = 1;
+	idx[1] = 1; /* repeated */
+	CHECK(!mp_playlist_move_block(&pl, idx, 2, 0));
+	idx[0] = 1;
+	idx[1] = 6; /* out of range */
+	CHECK(!mp_playlist_move_block(&pl, idx, 2, 0));
+	idx[1] = 2;
+	CHECK(!mp_playlist_move_block(&pl, idx, 2, 5)); /* would run off the end */
+	CHECK(!mp_playlist_move_block(&pl, idx, 0, 0)); /* nothing to move */
+	CHECK(!mp_playlist_move_block(&pl, NULL, 1, 0));
+	CHECK(!mp_playlist_move_block(&pl, idx, 7, 0)); /* more than there are */
+	CHECK(order_is(&pl, L"ABCDEF"));
+	CHECK_INT(pl.current, 2);
+	mp_playlist_free(&pl);
+}
+
+static void shift(void)
+{
+	MpPlaylist pl;
+	unsigned char sel[6];
+
+	/* Two apart, up: each passes its unselected neighbor. */
+	six(&pl);
+	memset(sel, 0, sizeof(sel));
+	sel[1] = sel[3] = 1;
+	pl.current = 3; /* D */
+	CHECK_INT(mp_playlist_shift(&pl, sel, -1), 2);
+	CHECK(order_is(&pl, L"BADCEF"));
+	/* The flags followed the entries. */
+	CHECK(sel[0] && !sel[1] && sel[2] && !sel[3] && !sel[4] && !sel[5]);
+	CHECK_INT(pl.current, 2);
+	/* Again: B is at the top and stays; D closes up behind it. */
+	CHECK_INT(mp_playlist_shift(&pl, sel, -1), 1);
+	CHECK(order_is(&pl, L"BDACEF"));
+	CHECK(sel[0] && sel[1] && !sel[2]);
+	CHECK_INT(pl.current, 1);
+	/* And again: packed at the top, nothing moves (and nothing wraps). */
+	CHECK_INT(mp_playlist_shift(&pl, sel, -1), 0);
+	CHECK(order_is(&pl, L"BDACEF"));
+	mp_playlist_free(&pl);
+
+	/* A run of two moves down as a block, the unselected track passing
+	 * over both. */
+	six(&pl);
+	memset(sel, 0, sizeof(sel));
+	sel[0] = sel[1] = 1;
+	pl.current = 2; /* C, the one being passed over */
+	CHECK_INT(mp_playlist_shift(&pl, sel, 1), 2);
+	CHECK(order_is(&pl, L"CABDEF"));
+	CHECK(!sel[0] && sel[1] && sel[2] && !sel[3]);
+	CHECK_INT(pl.current, 0);
+	mp_playlist_free(&pl);
+
+	/* Already at the bottom: nothing to do. */
+	six(&pl);
+	memset(sel, 0, sizeof(sel));
+	sel[4] = sel[5] = 1;
+	CHECK_INT(mp_playlist_shift(&pl, sel, 1), 0);
+	CHECK(order_is(&pl, L"ABCDEF"));
+	/* But up is fine. */
+	CHECK_INT(mp_playlist_shift(&pl, sel, -1), 2);
+	CHECK(order_is(&pl, L"ABCEFD"));
+	mp_playlist_free(&pl);
+
+	/* Nothing selected, no direction, no flags, too short a list. */
+	six(&pl);
+	memset(sel, 0, sizeof(sel));
+	CHECK_INT(mp_playlist_shift(&pl, sel, 1), 0);
+	sel[2] = 1;
+	CHECK_INT(mp_playlist_shift(&pl, sel, 0), 0);
+	CHECK_INT(mp_playlist_shift(&pl, NULL, 1), 0);
+	CHECK(order_is(&pl, L"ABCDEF"));
+	mp_playlist_free(&pl);
+	mp_playlist_init(&pl);
+	mp_playlist_add(&pl, L"C:\\x.mp3", L"A", L"", 0);
+	sel[0] = 1;
+	CHECK_INT(mp_playlist_shift(&pl, sel, 1), 0);
+	CHECK_INT(mp_playlist_shift(&pl, sel, -1), 0);
+	mp_playlist_free(&pl);
+}
+
+/* The track number is stored with the entry. */
+static void track_numbers_kept(void)
+{
+	MpPlaylist pl;
+	mp_playlist_init(&pl);
+	CHECK(mp_playlist_add(&pl, L"C:\\a.mp3", L"A", L"", 7));
+	CHECK(mp_playlist_add(&pl, L"C:\\b.mp3", L"B", L"", 0));
+	CHECK_INT(pl.items[0].track, 7);
+	CHECK_INT(pl.items[1].track, 0);
+	mp_playlist_free(&pl);
 }
 
 /* ---- Writing ------------------------------------------------------------ */
@@ -300,11 +632,11 @@ static void write_m3u8(void)
 	char *data;
 	size_t size;
 	mp_playlist_init(&pl);
-	mp_playlist_add(&pl, L"C:\\Music\\Lists\\here.mp3", L"Here", L"Band");
-	mp_playlist_add(&pl, L"C:\\Music\\Lists\\sub\\deeper.flac", L"Deep", L"");
-	mp_playlist_add(&pl, L"c:\\music\\lists\\case.mp3", L"Case", L"");
-	mp_playlist_add(&pl, L"C:\\Music\\ListsTwo\\sibling.mp3", L"Sibling", L"");
-	mp_playlist_add(&pl, L"D:\\Elsewhere\\\x00E9t\x00E9.wav", L"\x00C9t\x00E9", L"Bj\x00F6rk");
+	mp_playlist_add(&pl, L"C:\\Music\\Lists\\here.mp3", L"Here", L"Band", 0);
+	mp_playlist_add(&pl, L"C:\\Music\\Lists\\sub\\deeper.flac", L"Deep", L"", 0);
+	mp_playlist_add(&pl, L"c:\\music\\lists\\case.mp3", L"Case", L"", 0);
+	mp_playlist_add(&pl, L"C:\\Music\\ListsTwo\\sibling.mp3", L"Sibling", L"", 0);
+	mp_playlist_add(&pl, L"D:\\Elsewhere\\\x00E9t\x00E9.wav", L"\x00C9t\x00E9", L"Bj\x00F6rk", 0);
 
 	CHECK(mp_playlist_write_m3u8(&pl, L"C:\\Music\\Lists\\out.m3u8", &data, &size));
 	CHECK_INT(size, strlen(data));
@@ -357,6 +689,10 @@ int suite_playlist(void)
 	pls();
 	path_helpers();
 	list_and_navigation();
+	track_numbers_kept();
+	sorting();
+	move_block();
+	shift();
 	write_m3u8();
 	return 0;
 }

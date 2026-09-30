@@ -38,6 +38,12 @@
 
 #define TIMER_POSITION 1
 #define TIMER_INTERVAL_MS 250
+/* Scrolls the list while a dragged track is held above or below it. */
+#define TIMER_DRAG_SCROLL 2
+#define DRAG_SCROLL_MS 60
+
+/* The playlist's columns, in display order. */
+enum { COL_NUMBER, COL_TRACK, COL_TITLE, COL_ARTIST, COL_FILE };
 
 /* Seek bar resolution. 1000 steps is finer than a pixel on any screen. */
 #define SEEK_RANGE 1000
@@ -74,6 +80,24 @@ typedef struct {
 	MpPlaylist pl;
 	int repeat;
 	int dragging_seek;
+
+	/* The column the list was last sorted by (with its header arrow), or -1
+	 * once the order has been changed by anything else. It is a record of
+	 * what was done, not a live sorted view: the tracks can be dragged
+	 * around afterwards, and new ones are appended at the end. */
+	int sort_column;
+	int sort_desc;
+
+	/* Dragging tracks to reorder them. The selection moves with the mouse
+	 * as it goes; the order from before the drag is kept so Escape can put
+	 * everything back. */
+	int dragging;
+	size_t drag_offset;         /* the grabbed track's place in the selection */
+	POINT drag_pt;              /* last mouse position, list client coordinates */
+	MpEntry *drag_saved;        /* the entries as they were (shallow copies) */
+	size_t drag_saved_current;
+	unsigned char *drag_saved_sel;
+	int drag_saved_focus;
 	/* The slider's level, kept while muted so unmuting goes back to it. The
 	 * player itself is only ever told the level actually heard. Neither is
 	 * saved between runs: the player keeps no settings (see RUNNING.md). */
@@ -159,7 +183,7 @@ static int add_track(const wchar_t *path)
 	wchar_t title[MP_TAG_MAX], artist[MP_TAG_MAX];
 	mp_tags_read_file(path, &tags);
 	mp_track_display(&tags, path, title, MP_TAG_MAX, artist, MP_TAG_MAX);
-	return mp_playlist_add(&g.pl, path, title, artist);
+	return mp_playlist_add(&g.pl, path, title, artist, tags.track);
 }
 
 /* Appends every track listed in a playlist file. Returns the number added,
@@ -498,10 +522,368 @@ static int pick_playlist_file(wchar_t *path, size_t cap, int save)
 	return GetOpenFileNameW(&ofn) != 0;
 }
 
+/* ---- Reordering --------------------------------------------------------- */
+
+/* One flag per playlist entry, 1 where the list shows it selected. Returns
+ * NULL for an empty list or if out of memory; free() it. */
+static unsigned char *selection_flags(void)
+{
+	unsigned char *flags;
+	int i = -1;
+	if (g.pl.count == 0)
+		return NULL;
+	flags = (unsigned char *)calloc(g.pl.count, 1);
+	if (flags == NULL)
+		return NULL;
+	while ((i = ListView_GetNextItem(g.list, i, LVNI_SELECTED)) >= 0) {
+		if ((size_t)i < g.pl.count)
+			flags[i] = 1;
+	}
+	return flags;
+}
+
+/* Selects exactly the flagged rows and puts the focus (and the Shift+click
+ * anchor) on `focus`, if it is a row. The list is owner-data, so it keeps
+ * the selection by row number: after the tracks move, the selection has to
+ * be moved to match or it would stay on the old row numbers. */
+static void apply_selection(const unsigned char *flags, int focus)
+{
+	size_t i;
+	ListView_SetItemState(g.list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+	for (i = 0; i < g.pl.count; i++) {
+		if (flags[i])
+			ListView_SetItemState(g.list, (int)i, LVIS_SELECTED, LVIS_SELECTED);
+	}
+	if (focus >= 0 && (size_t)focus < g.pl.count) {
+		ListView_SetItemState(g.list, focus, LVIS_FOCUSED, LVIS_FOCUSED);
+		ListView_SetSelectionMark(g.list, focus);
+	}
+}
+
+/* The playing track's number in the list changes when tracks move. The
+ * status bar only shows it while playing; "Paused", "Stopped" and messages
+ * about files are left alone. */
+static void update_track_status(void)
+{
+	wchar_t status[64];
+	if (g.pl.current == MP_NONE || mp_player_state(g.player) != MP_PLAYER_PLAYING)
+		return;
+	wsprintfW(status, L"Track %d of %d", (int)g.pl.current + 1, (int)g.pl.count);
+	set_status(status);
+}
+
+/* Shows the sort arrow on g.sort_column's header, and on no other. The
+ * arrows are Common Controls 6 header formats, available from XP on. */
+static void show_sort_arrow(void)
+{
+	HWND header = ListView_GetHeader(g.list);
+	int i, n = Header_GetItemCount(header);
+	for (i = 0; i < n; i++) {
+		HDITEMW hd;
+		memset(&hd, 0, sizeof(hd));
+		hd.mask = HDI_FORMAT;
+		if (!Header_GetItem(header, i, &hd))
+			continue;
+		hd.fmt &= ~(HDF_SORTUP | HDF_SORTDOWN);
+		if (i == g.sort_column)
+			hd.fmt |= g.sort_desc ? HDF_SORTDOWN : HDF_SORTUP;
+		Header_SetItem(header, i, &hd);
+	}
+}
+
+/* The order is no longer the sorted one: drop the arrow, so the next click
+ * on that header sorts ascending again rather than reversing. */
+static void forget_sort(void)
+{
+	if (g.sort_column >= 0) {
+		g.sort_column = -1;
+		show_sort_arrow();
+	}
+}
+
+static void end_drag(int cancel);
+
+/* Anything that changes the list (adding, removing, sorting, Move Up/Down)
+ * first ends a drag in progress, keeping what it did, so the drag never
+ * works on indexes that have changed under it. */
+static void finish_drag(void)
+{
+	end_drag(0);
+}
+
+static void sort_by_column(int column)
+{
+	MpSortKey key;
+	unsigned char *sel, *moved;
+	size_t *new_index, i;
+	int focus, desc;
+	switch (column) {
+	case COL_TRACK: key = MP_SORT_TRACK; break;
+	case COL_TITLE: key = MP_SORT_TITLE; break;
+	case COL_ARTIST: key = MP_SORT_ARTIST; break;
+	case COL_FILE: key = MP_SORT_FILE; break;
+	default: return; /* "#" is the position in the list: nothing to sort by */
+	}
+	finish_drag();
+	if (g.pl.count == 0)
+		return;
+	/* A second click on the same header reverses it, as in Explorer. */
+	desc = column == g.sort_column ? !g.sort_desc : 0;
+	sel = selection_flags();
+	moved = (unsigned char *)calloc(g.pl.count, 1);
+	new_index = (size_t *)malloc(g.pl.count * sizeof(size_t));
+	focus = ListView_GetNextItem(g.list, -1, LVNI_FOCUSED);
+	if (sel != NULL && moved != NULL && new_index != NULL &&
+		mp_playlist_sort(&g.pl, key, desc, new_index)) {
+		/* The same tracks stay selected, wherever they went. */
+		for (i = 0; i < g.pl.count; i++) {
+			if (sel[i])
+				moved[new_index[i]] = 1;
+		}
+		focus = focus >= 0 ? (int)new_index[focus] : -1;
+		apply_selection(moved, focus);
+		g.sort_column = column;
+		g.sort_desc = desc;
+		show_sort_arrow();
+		refresh_list();
+		if (focus >= 0)
+			ListView_EnsureVisible(g.list, focus, FALSE);
+		update_track_status();
+	}
+	free(sel);
+	free(moved);
+	free(new_index);
+}
+
+/* Move Up / Move Down: the selected tracks, one place. */
+static void cmd_move_selected(int direction)
+{
+	unsigned char *sel;
+	size_t i, first = MP_NONE, last = 0;
+	finish_drag();
+	sel = selection_flags();
+	if (sel == NULL)
+		return;
+	if (mp_playlist_shift(&g.pl, sel, direction) > 0) {
+		for (i = 0; i < g.pl.count; i++) {
+			if (sel[i]) {
+				if (first == MP_NONE)
+					first = i;
+				last = i;
+			}
+		}
+		/* The focus goes to the leading edge of the selection, and that
+		 * is what is scrolled into view, so repeated presses can be
+		 * followed all the way to the end of a long list. */
+		apply_selection(sel, direction < 0 ? (int)first : (int)last);
+		ListView_EnsureVisible(g.list, direction < 0 ? (int)first : (int)last, FALSE);
+		forget_sort();
+		refresh_list();
+		update_track_status();
+	}
+	free(sel);
+}
+
+/* Whether Move Up / Move Down (and Remove) have anything to do, for
+ * graying out the menu items. Move Up can do something when some unselected
+ * track sits above the last selected one: that is, when not all the rows
+ * down to the last selected one are selected. Move Down likewise. */
+static void update_edit_menu(void)
+{
+	HMENU menu = GetMenu(g.hwnd);
+	int n = ListView_GetSelectedCount(g.list), first = -1, last = -1, i = -1;
+	int can_up, can_down;
+	while ((i = ListView_GetNextItem(g.list, i, LVNI_SELECTED)) >= 0) {
+		if (first < 0)
+			first = i;
+		last = i;
+	}
+	can_up = n > 0 && last + 1 > n;
+	can_down = n > 0 && first < (int)g.pl.count - n;
+	EnableMenuItem(menu, IDM_MOVE_UP, MF_BYCOMMAND | (can_up ? MF_ENABLED : MF_GRAYED));
+	EnableMenuItem(menu, IDM_MOVE_DOWN, MF_BYCOMMAND | (can_down ? MF_ENABLED : MF_GRAYED));
+	EnableMenuItem(menu, IDM_REMOVE_SELECTED, MF_BYCOMMAND | (n > 0 ? MF_ENABLED : MF_GRAYED));
+}
+
+/* Called on LVN_BEGINDRAG: the list has seen the mouse go down on a row and
+ * move far enough to count as a drag. From here the main window captures
+ * the mouse and does the rest (drag_move, end_drag). */
+static void begin_drag(int item)
+{
+	unsigned char *sel;
+	size_t i, rank = 0;
+	if (g.dragging || item < 0 || (size_t)item >= g.pl.count)
+		return;
+	sel = selection_flags();
+	if (sel == NULL)
+		return;
+	/* The list normally selects a row as the mouse goes down on it, so the
+	 * grabbed row is already selected (along with any others, which then
+	 * come along). If it is not, drag just that row, as Explorer does. */
+	if (!sel[item]) {
+		memset(sel, 0, g.pl.count);
+		sel[item] = 1;
+		apply_selection(sel, item);
+	}
+	for (i = 0; i < (size_t)item; i++)
+		rank += sel[i];
+	g.drag_saved = (MpEntry *)malloc(g.pl.count * sizeof(MpEntry));
+	if (g.drag_saved == NULL) {
+		free(sel);
+		return;
+	}
+	memcpy(g.drag_saved, g.pl.items, g.pl.count * sizeof(MpEntry));
+	g.drag_saved_current = g.pl.current;
+	g.drag_saved_sel = sel;
+	g.drag_saved_focus = ListView_GetNextItem(g.list, -1, LVNI_FOCUSED);
+	g.drag_offset = rank;
+	g.dragging = 1;
+	SetCapture(g.hwnd);
+	/* While the mouse is captured nobody asks for a cursor (no
+	 * WM_SETCURSOR), so this one stays until the drag ends. */
+	SetCursor(LoadCursor(NULL, IDC_SIZENS));
+}
+
+/* The row under list-client y, clamped to the list. Worked out from the
+ * row height rather than by hit-testing, so it also works to the right of
+ * the last column and above or below the rows. */
+static int row_at(int y)
+{
+	RECT r;
+	int top = ListView_GetTopIndex(g.list), h, row;
+	if (g.pl.count == 0 || !ListView_GetItemRect(g.list, top, &r, LVIR_BOUNDS))
+		return -1;
+	h = r.bottom - r.top;
+	if (h <= 0)
+		return -1;
+	row = y >= r.top ? top + (y - r.top) / h : top - 1 - (r.top - y - 1) / h;
+	if (row < 0)
+		row = 0;
+	if ((size_t)row >= g.pl.count)
+		row = (int)g.pl.count - 1;
+	return row;
+}
+
+/* Moves the dragged tracks so the grabbed one is on the row under the
+ * mouse, with the rest of the selection gathered around it. */
+static void drag_move(void)
+{
+	size_t *idx, n = 0, to, i;
+	unsigned char *flags;
+	int row = row_at(g.drag_pt.y), sel = -1;
+	int total = ListView_GetSelectedCount(g.list);
+	if (row < 0 || total <= 0)
+		return;
+	idx = (size_t *)malloc((size_t)total * sizeof(size_t));
+	flags = (unsigned char *)calloc(g.pl.count, 1);
+	if (idx == NULL || flags == NULL) {
+		free(idx);
+		free(flags);
+		return;
+	}
+	while ((int)n < total && (sel = ListView_GetNextItem(g.list, sel, LVNI_SELECTED)) >= 0)
+		idx[n++] = (size_t)sel;
+	to = (size_t)row < g.drag_offset ? 0 : (size_t)row - g.drag_offset;
+	if (to > g.pl.count - n)
+		to = g.pl.count - n;
+	/* Already there (and gathered together): nothing to do, which is the
+	 * usual case - most mouse moves stay within one row. */
+	if (n > 0 && !(idx[0] == to && idx[n - 1] == to + n - 1) &&
+		mp_playlist_move_block(&g.pl, idx, n, to)) {
+		for (i = 0; i < n; i++)
+			flags[to + i] = 1;
+		apply_selection(flags, (int)(to + g.drag_offset));
+		refresh_list();
+		update_track_status();
+	}
+	free(idx);
+	free(flags);
+}
+
+/* Holding the dragged tracks above the first visible row or below the list
+ * scrolls it, a row at a time, for as long as the mouse stays there. */
+static void drag_autoscroll(void)
+{
+	RECT client, first;
+	int top = ListView_GetTopIndex(g.list), dir = 0;
+	GetClientRect(g.list, &client);
+	if (g.pl.count > 0 && ListView_GetItemRect(g.list, top, &first, LVIR_BOUNDS)) {
+		/* The header sits inside the list's client area, so "above the
+		 * list" means above the first visible row, not above the client. */
+		if (g.drag_pt.y < first.top)
+			dir = -1;
+		else if (g.drag_pt.y >= client.bottom)
+			dir = 1;
+		if (dir != 0) {
+			ListView_Scroll(g.list, 0, dir * (first.bottom - first.top));
+			drag_move();
+			return;
+		}
+	}
+	KillTimer(g.hwnd, TIMER_DRAG_SCROLL);
+}
+
+static void on_drag_mouse_move(LPARAM lp)
+{
+	RECT client;
+	g.drag_pt.x = (short)LOWORD(lp);
+	g.drag_pt.y = (short)HIWORD(lp);
+	MapWindowPoints(g.hwnd, g.list, &g.drag_pt, 1);
+	drag_move();
+	GetClientRect(g.list, &client);
+	/* Start scrolling if the mouse has left the rows; the timer stops
+	 * itself once it is back over them. */
+	{
+		RECT first;
+		int top = ListView_GetTopIndex(g.list);
+		if (ListView_GetItemRect(g.list, top, &first, LVIR_BOUNDS) &&
+			(g.drag_pt.y < first.top || g.drag_pt.y >= client.bottom))
+			SetTimer(g.hwnd, TIMER_DRAG_SCROLL, DRAG_SCROLL_MS, NULL);
+	}
+}
+
+/* Ends a drag: keeping the new order, or (cancel) restoring the old one. */
+static void end_drag(int cancel)
+{
+	size_t i;
+	int changed = 0;
+	if (!g.dragging)
+		return;
+	/* Cleared before ReleaseCapture, which sends WM_CAPTURECHANGED, which
+	 * would otherwise come back here. */
+	g.dragging = 0;
+	KillTimer(g.hwnd, TIMER_DRAG_SCROLL);
+	if (GetCapture() == g.hwnd)
+		ReleaseCapture();
+	if (cancel) {
+		/* Nothing can add or remove tracks during a drag (every command
+		 * that would ends it first), so the saved entries are exactly the
+		 * current ones in the old order. */
+		memcpy(g.pl.items, g.drag_saved, g.pl.count * sizeof(MpEntry));
+		g.pl.current = g.drag_saved_current;
+		apply_selection(g.drag_saved_sel, g.drag_saved_focus);
+		refresh_list();
+		update_track_status();
+	} else {
+		/* Compared by the path pointers, which identify each entry. */
+		for (i = 0; i < g.pl.count && !changed; i++)
+			changed = g.pl.items[i].path != g.drag_saved[i].path;
+		if (changed)
+			forget_sort();
+	}
+	free(g.drag_saved);
+	free(g.drag_saved_sel);
+	g.drag_saved = NULL;
+	g.drag_saved_sel = NULL;
+	SetCursor(LoadCursor(NULL, IDC_ARROW));
+}
+
 /* ---- Commands ----------------------------------------------------------- */
 
 static void clear_playlist(void)
 {
+	finish_drag();
+	forget_sort();
 	mp_player_unload(g.player);
 	mp_playlist_clear(&g.pl);
 	refresh_list();
@@ -515,7 +897,9 @@ static void clear_playlist(void)
 static size_t add_paths(wchar_t **paths, size_t count)
 {
 	size_t i, first = g.pl.count, skipped = 0;
-	HCURSOR old = SetCursor(LoadCursor(NULL, IDC_WAIT));
+	HCURSOR old;
+	finish_drag();
+	old = SetCursor(LoadCursor(NULL, IDC_WAIT));
 	for (i = 0; i < count; i++) {
 		if (is_playlist_file(paths[i])) {
 			if (add_playlist_file(paths[i]) < 0)
@@ -534,6 +918,9 @@ static size_t add_paths(wchar_t **paths, size_t count)
 		}
 	}
 	SetCursor(old);
+	/* New tracks go on the end, so the list is no longer in sorted order. */
+	if (g.pl.count > first)
+		forget_sort();
 	refresh_list();
 	if (skipped > 0) {
 		wchar_t msg[128];
@@ -601,8 +988,10 @@ static void cmd_save_playlist(void)
 
 static void cmd_remove_selected(void)
 {
-	int *rows, n = 0, i, sel = -1, total = ListView_GetSelectedCount(g.list);
+	int *rows, n = 0, i, sel = -1, total;
 	int removed_current = 0;
+	finish_drag();
+	total = ListView_GetSelectedCount(g.list);
 	if (total <= 0)
 		return;
 	rows = (int *)malloc((size_t)total * sizeof(int));
@@ -645,6 +1034,8 @@ static void on_command(int id)
 	case IDC_BTN_PLAYLIST: cmd_open_playlist(); break;
 	case IDM_SAVE_PLAYLIST: cmd_save_playlist(); break;
 	case IDM_REMOVE_SELECTED: cmd_remove_selected(); break;
+	case IDM_MOVE_UP: cmd_move_selected(-1); break;
+	case IDM_MOVE_DOWN: cmd_move_selected(1); break;
 	case IDM_CLEAR_PLAYLIST: clear_playlist(); break;
 	case IDM_EXIT: DestroyWindow(g.hwnd); break;
 	case IDM_PLAY_PAUSE:
@@ -663,6 +1054,11 @@ static void on_command(int id)
 	case IDM_VOLUME_DOWN: set_volume(g.volume - VOLUME_STEP); break;
 	case IDM_MUTE: toggle_mute(); break;
 	case IDM_ABOUT: cmd_about(); break;
+	case IDCANCEL:
+		/* IsDialogMessage turns Escape into IDCANCEL: during a drag it
+		 * puts the tracks back where they were. */
+		end_drag(1);
+		break;
 	case IDOK:
 		/* IsDialogMessage turns Enter into IDOK. In the list it means "play
 		 * this one", like double-clicking. */
@@ -1028,10 +1424,14 @@ static void on_create(HWND hwnd)
 	g.list = make_child(WC_LISTVIEWW, L"",
 		LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS | WS_TABSTOP, WS_EX_CLIENTEDGE, IDC_LIST);
 	ListView_SetExtendedListViewStyle(g.list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
-	add_column(0, L"#", g.unit * 3, LVCFMT_RIGHT);
-	add_column(1, L"Title", g.unit * 14, LVCFMT_LEFT);
-	add_column(2, L"Artist", g.unit * 10, LVCFMT_LEFT);
-	add_column(3, L"File", g.unit * 14, LVCFMT_LEFT);
+	/* "#" is the place in the playlist; "Track" is the track number from
+	 * the file's metadata (the number on the album). */
+	add_column(COL_NUMBER, L"#", g.unit * 3, LVCFMT_RIGHT);
+	add_column(COL_TRACK, L"Track", g.unit * 3 + g.unit / 2, LVCFMT_RIGHT);
+	add_column(COL_TITLE, L"Title", g.unit * 14, LVCFMT_LEFT);
+	add_column(COL_ARTIST, L"Artist", g.unit * 10, LVCFMT_LEFT);
+	add_column(COL_FILE, L"File", g.unit * 14, LVCFMT_LEFT);
+	g.sort_column = -1;
 
 	g.status = make_child(STATUSCLASSNAMEW, L"", SBARS_SIZEGRIP, 0, IDC_STATUS);
 
@@ -1050,23 +1450,37 @@ static LRESULT on_list_notify(NMHDR *nm)
 	case LVN_GETDISPINFOW: {
 		NMLVDISPINFOW *di = (NMLVDISPINFOW *)nm;
 		/* The ListView copies the text before the next call, so a static
-		 * buffer is fine for the one computed column. */
+		 * buffer is fine for the computed columns. */
 		static wchar_t number[16];
 		size_t i = (size_t)di->item.iItem;
 		if ((di->item.mask & LVIF_TEXT) && i < g.pl.count) {
 			const MpEntry *e = &g.pl.items[i];
 			switch (di->item.iSubItem) {
-			case 0:
+			case COL_NUMBER:
 				wsprintfW(number, L"%d", (int)i + 1);
 				di->item.pszText = number;
 				break;
-			case 1: di->item.pszText = e->title; break;
-			case 2: di->item.pszText = e->artist; break;
+			case COL_TRACK:
+				/* No track number in the file: left blank, not "0". */
+				if (e->track != 0)
+					wsprintfW(number, L"%u", e->track);
+				else
+					number[0] = 0;
+				di->item.pszText = number;
+				break;
+			case COL_TITLE: di->item.pszText = e->title; break;
+			case COL_ARTIST: di->item.pszText = e->artist; break;
 			default: di->item.pszText = (LPWSTR)mp_path_basename(e->path); break;
 			}
 		}
 		return 0;
 	}
+	case LVN_COLUMNCLICK:
+		sort_by_column(((NMLISTVIEW *)nm)->iSubItem);
+		return 0;
+	case LVN_BEGINDRAG:
+		begin_drag(((NMLISTVIEW *)nm)->iItem);
+		return 0;
 	case NM_DBLCLK: {
 		NMITEMACTIVATE *ia = (NMITEMACTIVATE *)nm;
 		if (ia->iItem >= 0)
@@ -1171,7 +1585,30 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 	case WM_TIMER:
 		if (wp == TIMER_POSITION)
 			update_position();
+		else if (wp == TIMER_DRAG_SCROLL && g.dragging)
+			drag_autoscroll();
 		return 0;
+	case WM_MOUSEMOVE:
+		if (g.dragging) {
+			on_drag_mouse_move(lp);
+			return 0;
+		}
+		break;
+	case WM_LBUTTONUP:
+		if (g.dragging) {
+			end_drag(0);
+			return 0;
+		}
+		break;
+	case WM_CAPTURECHANGED:
+		/* Something else took the mouse (Alt+Tab, a message box): keep
+		 * the order as it is now, like letting go. */
+		if (g.dragging && (HWND)lp != hwnd)
+			end_drag(0);
+		break;
+	case WM_INITMENUPOPUP:
+		update_edit_menu();
+		break;
 	case WM_APP_TRACK_END:
 		on_track_end((UINT)wp);
 		return 0;

@@ -16,6 +16,8 @@
 #define IDM_REMOVE_SELECTED 1005
 #define IDM_CLEAR_PLAYLIST  1006
 #define IDM_EXIT            1007
+#define IDM_MOVE_UP         1008
+#define IDM_MOVE_DOWN       1009
 #define IDM_PLAY_PAUSE      1101
 #define IDM_STOP            1102
 #define IDM_PREVIOUS        1103

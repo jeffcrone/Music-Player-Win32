@@ -55,7 +55,8 @@ void mp_playlist_free(MpPlaylist *pl)
 	mp_playlist_init(pl);
 }
 
-int mp_playlist_add(MpPlaylist *pl, const wchar_t *path, const wchar_t *title, const wchar_t *artist)
+int mp_playlist_add(MpPlaylist *pl, const wchar_t *path, const wchar_t *title, const wchar_t *artist,
+	unsigned track)
 {
 	MpEntry e;
 	if (pl->count == pl->cap) {
@@ -69,6 +70,7 @@ int mp_playlist_add(MpPlaylist *pl, const wchar_t *path, const wchar_t *title, c
 	e.path = wdup(path);
 	e.title = wdup(title);
 	e.artist = wdup(artist);
+	e.track = track;
 	if (e.path == NULL || e.title == NULL || e.artist == NULL) {
 		free(e.path);
 		free(e.title);
@@ -111,6 +113,224 @@ size_t mp_playlist_step(const MpPlaylist *pl, size_t from, int direction, int wr
 	if (from > 0)
 		return from - 1;
 	return wrap ? pl->count - 1 : MP_NONE;
+}
+
+/* ---- Reordering --------------------------------------------------------- */
+
+/* The file name part of a path. (track.c has the public version, but the
+ * playlist code does not depend on the display code.) */
+static const wchar_t *file_part(const wchar_t *path)
+{
+	const wchar_t *p, *base = path;
+	for (p = path; *p != 0; p++) {
+		if (*p == L'\\' || *p == L'/' || *p == L':')
+			base = p + 1;
+	}
+	return base;
+}
+
+/* Language-aware, case-insensitive, as Explorer sorts names. CompareStringW
+ * exists on every Windows version; the fancier CompareStringEx does not
+ * exist on XP. */
+static int text_cmp(const wchar_t *a, const wchar_t *b)
+{
+	int r = CompareStringW(LOCALE_USER_DEFAULT, NORM_IGNORECASE, a, -1, b, -1);
+	if (r == 0) /* cannot happen with valid arguments; be deterministic */
+		return wcscmp(a, b) < 0 ? -1 : wcscmp(a, b) > 0;
+	return r - CSTR_EQUAL; /* CSTR_LESS_THAN 1, CSTR_EQUAL 2, CSTR_GREATER_THAN 3 */
+}
+
+typedef struct {
+	const MpEntry *items;
+	MpSortKey key;
+	int descending;
+} SortSpec;
+
+/* Negative, zero or positive, as a comes before, ties with, or comes after
+ * b in the requested order. Blanks always come after non-blanks. */
+static int entry_cmp(const SortSpec *spec, const MpEntry *a, const MpEntry *b)
+{
+	int r;
+	switch (spec->key) {
+	case MP_SORT_TRACK:
+		if ((a->track == 0) != (b->track == 0))
+			return a->track == 0 ? 1 : -1;
+		r = a->track < b->track ? -1 : a->track > b->track;
+		break;
+	case MP_SORT_ARTIST:
+		if ((a->artist[0] == 0) != (b->artist[0] == 0))
+			return a->artist[0] == 0 ? 1 : -1;
+		r = text_cmp(a->artist, b->artist);
+		break;
+	case MP_SORT_FILE:
+		r = text_cmp(file_part(a->path), file_part(b->path));
+		break;
+	default:
+		r = text_cmp(a->title, b->title);
+		break;
+	}
+	return spec->descending ? -r : r;
+}
+
+/* Merge sort of an index array: stable (which qsort is not guaranteed to
+ * be), and O(n log n) however large the playlist. */
+static void merge_sort(const SortSpec *spec, size_t *idx, size_t *tmp, size_t n)
+{
+	size_t mid, i, j, k;
+	if (n < 2)
+		return;
+	mid = n / 2;
+	merge_sort(spec, idx, tmp, mid);
+	merge_sort(spec, idx + mid, tmp, n - mid);
+	i = 0;
+	j = mid;
+	k = 0;
+	while (i < mid && j < n) {
+		/* <= 0 takes from the left half on ties: that is the stability. */
+		if (entry_cmp(spec, &spec->items[idx[i]], &spec->items[idx[j]]) <= 0)
+			tmp[k++] = idx[i++];
+		else
+			tmp[k++] = idx[j++];
+	}
+	while (i < mid)
+		tmp[k++] = idx[i++];
+	while (j < n)
+		tmp[k++] = idx[j++];
+	memcpy(idx, tmp, n * sizeof(size_t));
+}
+
+/* Rearranges the entries so that new position i holds old entry order[i],
+ * and moves `current` along. Fills new_index (old -> new) if not NULL.
+ * Returns 0 if out of memory, with nothing changed. */
+static int apply_order(MpPlaylist *pl, const size_t *order, size_t *new_index)
+{
+	size_t i;
+	MpEntry *items;
+	if (pl->count == 0)
+		return 1;
+	items = (MpEntry *)malloc(pl->count * sizeof(MpEntry));
+	if (items == NULL)
+		return 0;
+	for (i = 0; i < pl->count; i++)
+		items[i] = pl->items[order[i]];
+	for (i = 0; i < pl->count; i++) {
+		if (order[i] == pl->current) {
+			pl->current = i;
+			break;
+		}
+	}
+	if (new_index != NULL) {
+		for (i = 0; i < pl->count; i++)
+			new_index[order[i]] = i;
+	}
+	/* The entries were copied whole (the strings are shared, not
+	 * duplicated), so only the array itself is swapped. */
+	memcpy(pl->items, items, pl->count * sizeof(MpEntry));
+	free(items);
+	return 1;
+}
+
+int mp_playlist_sort(MpPlaylist *pl, MpSortKey key, int descending, size_t *new_index)
+{
+	SortSpec spec;
+	size_t *order, *tmp, i;
+	int ok;
+	if (pl->count == 0)
+		return 1;
+	order = (size_t *)malloc(pl->count * sizeof(size_t));
+	tmp = (size_t *)malloc(pl->count * sizeof(size_t));
+	if (order == NULL || tmp == NULL) {
+		free(order);
+		free(tmp);
+		return 0;
+	}
+	for (i = 0; i < pl->count; i++)
+		order[i] = i;
+	spec.items = pl->items;
+	spec.key = key;
+	spec.descending = descending;
+	merge_sort(&spec, order, tmp, pl->count);
+	ok = apply_order(pl, order, new_index);
+	free(order);
+	free(tmp);
+	return ok;
+}
+
+int mp_playlist_move_block(MpPlaylist *pl, const size_t *indices, size_t n, size_t to)
+{
+	size_t *order, i, k, u, s;
+	int ok;
+	if (n == 0 || n > pl->count || to > pl->count - n || indices == NULL)
+		return 0;
+	for (i = 0; i < n; i++) {
+		if (indices[i] >= pl->count || (i > 0 && indices[i] <= indices[i - 1]))
+			return 0;
+	}
+	order = (size_t *)malloc(pl->count * sizeof(size_t));
+	if (order == NULL)
+		return 0;
+	/* Walk the unselected entries (u) in order, dropping the whole block in
+	 * when the output reaches `to`. `s` steps through `indices` to tell
+	 * selected entries apart without a lookup table. */
+	k = 0;
+	s = 0;
+	for (u = 0; u <= pl->count; u++) {
+		if (k == to) {
+			for (i = 0; i < n; i++)
+				order[k++] = indices[i];
+		}
+		if (u == pl->count)
+			break;
+		if (s < n && indices[s] == u) {
+			s++;
+			continue;
+		}
+		order[k++] = u;
+	}
+	ok = apply_order(pl, order, NULL);
+	free(order);
+	return ok;
+}
+
+static void swap_entries(MpPlaylist *pl, unsigned char *selected, size_t a, size_t b)
+{
+	MpEntry e = pl->items[a];
+	unsigned char f = selected[a];
+	pl->items[a] = pl->items[b];
+	pl->items[b] = e;
+	selected[a] = selected[b];
+	selected[b] = f;
+	if (pl->current == a)
+		pl->current = b;
+	else if (pl->current == b)
+		pl->current = a;
+}
+
+size_t mp_playlist_shift(MpPlaylist *pl, unsigned char *selected, int direction)
+{
+	size_t i, moved = 0;
+	if (selected == NULL || pl->count < 2 || direction == 0)
+		return 0;
+	/* Each selected entry trades places with the unselected neighbor on the
+	 * side it is moving toward. Walking from that side means an entry never
+	 * trades with one that has just moved, and a run of selected entries
+	 * stuck against the end stays stuck (its neighbor is selected too). */
+	if (direction < 0) {
+		for (i = 1; i < pl->count; i++) {
+			if (selected[i] && !selected[i - 1]) {
+				swap_entries(pl, selected, i, i - 1);
+				moved++;
+			}
+		}
+	} else {
+		for (i = pl->count - 1; i-- > 0;) {
+			if (selected[i] && !selected[i + 1]) {
+				swap_entries(pl, selected, i, i + 1);
+				moved++;
+			}
+		}
+	}
+	return moved;
 }
 
 /* ---- Path lists --------------------------------------------------------- */
