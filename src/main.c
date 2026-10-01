@@ -65,6 +65,7 @@ typedef struct {
 	HWND hwnd;
 	HWND title, artist, seek, time, list, status;
 	HWND vol_label, vol_bar;
+	HWND speed_label, speed_box;
 	HWND btn_prev, btn_play, btn_stop, btn_next, btn_add, btn_playlist;
 	HFONT font, title_font, bold_font;
 	HICON icons[MP_GLYPH_COUNT]; /* the playback buttons' symbols */
@@ -103,6 +104,7 @@ typedef struct {
 	 * saved between runs: the player keeps no settings (see RUNNING.md). */
 	int volume;
 	int muted;
+	int speed_index; /* into `speeds`; also not saved between runs */
 	MpPlayerState shown_state; /* what the Play button currently says */
 } App;
 
@@ -440,6 +442,51 @@ static void on_volume_scroll(void)
 	 * without moving it, must not unmute. */
 	if (pos != g.volume)
 		set_volume(pos);
+}
+
+/* ---- Speed -------------------------------------------------------------- */
+
+/* The speeds on offer, as percentages (see player.h), with their labels.
+ * The menu IDs are IDM_SPEED_25 + index. */
+static const int speeds[] = { 25, 50, 75, 100, 125, 150, 175, 200, 300 };
+static const wchar_t *const speed_names[] = {
+	L"0.25x", L"0.5x", L"0.75x", L"1x", L"1.25x", L"1.5x", L"1.75x", L"2x", L"3x"
+};
+#define SPEED_COUNT ((int)(sizeof(speeds) / sizeof(speeds[0])))
+#define SPEED_NORMAL 3 /* 1x */
+
+/* Sets the speed and shows it in both places it can be chosen: the drop-
+ * down and the Playback > Speed menu (as a radio check). */
+static void set_speed_index(int index)
+{
+	if (index < 0 || index >= SPEED_COUNT)
+		return;
+	g.speed_index = index;
+	mp_player_set_speed(g.player, speeds[index]);
+	SendMessageW(g.speed_box, CB_SETCURSEL, (WPARAM)index, 0);
+	CheckMenuRadioItem(GetMenu(g.hwnd), IDM_SPEED_25, IDM_SPEED_25 + SPEED_COUNT - 1,
+		IDM_SPEED_25 + index, MF_BYCOMMAND);
+	/* The position was just recalculated at the new speed. */
+	update_position();
+}
+
+/*
+ * The drop-down's notifications. While its list is open, moving through it
+ * (with the arrow keys or the mouse) already sends CBN_SELCHANGE for every
+ * item passed; each change of speed restarts the audio from the current
+ * point, so applying those would stutter. So a change is applied when the
+ * list closes (CBN_CLOSEUP; if it was canceled the selection is back where
+ * it was and nothing changes), or straight away when the list is closed
+ * and the arrow keys step the selection.
+ */
+static void on_speed_box(int code)
+{
+	int sel = (int)SendMessageW(g.speed_box, CB_GETCURSEL, 0, 0);
+	if (sel == CB_ERR || sel == g.speed_index)
+		return;
+	if (code == CBN_CLOSEUP ||
+		(code == CBN_SELCHANGE && !SendMessageW(g.speed_box, CB_GETDROPPEDSTATE, 0, 0)))
+		set_speed_index(sel);
 }
 
 /* ---- File dialogs ------------------------------------------------------- */
@@ -1053,6 +1100,17 @@ static void on_command(int id)
 	case IDM_VOLUME_UP: set_volume(g.volume + VOLUME_STEP); break;
 	case IDM_VOLUME_DOWN: set_volume(g.volume - VOLUME_STEP); break;
 	case IDM_MUTE: toggle_mute(); break;
+	case IDM_SPEED_25:
+	case IDM_SPEED_50:
+	case IDM_SPEED_75:
+	case IDM_SPEED_100:
+	case IDM_SPEED_125:
+	case IDM_SPEED_150:
+	case IDM_SPEED_175:
+	case IDM_SPEED_200:
+	case IDM_SPEED_300:
+		set_speed_index(id - IDM_SPEED_25);
+		break;
 	case IDM_ABOUT: cmd_about(); break;
 	case IDCANCEL:
 		/* IsDialogMessage turns Escape into IDCANCEL: during a drag it
@@ -1108,6 +1166,18 @@ static int time_width(void)
 	return text_width(g.font, L"00:00:00 / 00:00:00") + g.unit;
 }
 
+/* The speed label and drop-down, sized for their widest text. */
+static int speed_label_width(void)
+{
+	return text_width(g.font, L"Speed:") + g.unit / 3;
+}
+
+static int speed_box_width(void)
+{
+	/* The text, the drop-down arrow, and the box's own margins. */
+	return text_width(g.font, L"0.25x") + GetSystemMetrics(SM_CXVSCROLL) + g.unit;
+}
+
 static void layout(void)
 {
 	RECT rc, sr;
@@ -1152,6 +1222,20 @@ static void layout(void)
 	MoveWindow(g.btn_play, x + wp + gap, y, wplay, btn_h, TRUE);
 	MoveWindow(g.btn_stop, x + wp + wplay + 2 * gap, y, ws, btn_h, TRUE);
 	MoveWindow(g.btn_next, x + wp + wplay + ws + 3 * gap, y, wn, btn_h, TRUE);
+	/* Speed goes after Next, with the playback controls it belongs to. */
+	{
+		RECT cr;
+		int sx = x + wp + wplay + ws + wn + 5 * gap, box_h;
+		MoveWindow(g.speed_label, sx, y + (btn_h - g.unit) / 2, speed_label_width(), g.unit + 2, TRUE);
+		sx += speed_label_width();
+		/* A drop-down list keeps its own height (set by its font); the
+		 * height given here is how tall the opened list may be. So place
+		 * it first, then center it on the buttons by its real height. */
+		MoveWindow(g.speed_box, sx, y, speed_box_width(), g.unit * 16, TRUE);
+		GetWindowRect(g.speed_box, &cr);
+		box_h = cr.bottom - cr.top;
+		MoveWindow(g.speed_box, sx, y + (btn_h - box_h) / 2, speed_box_width(), g.unit * 16, TRUE);
+	}
 	MoveWindow(g.btn_playlist, x + w - wl, y, wl, btn_h, TRUE);
 	MoveWindow(g.btn_add, x + w - wl - gap - wa, y, wa, btn_h, TRUE);
 	y += btn_h + gap;
@@ -1165,7 +1249,7 @@ static int min_client_width(void)
 	int gap = g.unit / 2, margins = g.unit * 4 / 3;
 	int buttons = icon_button_width(L"Previous") + icon_button_width(L"Pause") +
 		icon_button_width(L"Stop") + icon_button_width(L"Next") + button_width(L"Add Files...") +
-		button_width(L"Open Playlist...") + 5 * gap + g.unit * 2;
+		button_width(L"Open Playlist...") + speed_label_width() + speed_box_width() + 7 * gap + g.unit * 2;
 	/* The seek row must also fit, with a seek bar still wide enough to use.
 	 * The button row is normally the wider, but that depends on the font. */
 	int seek_row = g.unit * 8 + time_width() + volume_label_width() + volume_bar_width();
@@ -1305,6 +1389,36 @@ static void set_menu_bitmap(UINT id, HBITMAP bmp)
  * major version matters, and it needs no manifest entry to report it: every
  * version the manifest does not list still reports 6 or more.
  */
+/*
+ * Gives the menu bar the window's background color.
+ *
+ * On Windows 10 and 11 this changes nothing visible: the theme paints the
+ * menu bar itself, in white, and ignores a menu's background brush (tried
+ * and confirmed). That white is why the window is white too. On Windows XP
+ * and with the classic theme the brush is used, and makes the bar match
+ * the window there as well.
+ *
+ * The bar only: with MIM_APPLYTOSUBMENUS the drop-down menus also take
+ * the brush, but on Windows 10/11 only partly - their icon column and the
+ * highlight stay the theme's - which looked two-toned. GetSysColorBrush is
+ * a system-owned brush that follows color changes (high contrast too) by
+ * itself, so there is nothing to free or recreate.
+ */
+static void match_menu_bar_to_window(void)
+{
+	MENUINFO mi;
+	HMENU menu = GetMenu(g.hwnd);
+	if (menu == NULL)
+		return;
+	memset(&mi, 0, sizeof(mi));
+	mi.cbSize = sizeof(mi);
+	mi.fMask = MIM_BACKGROUND;
+	mi.hbrBack = GetSysColorBrush(COLOR_WINDOW);
+	SetMenuInfo(menu, &mi);
+	/* The bar is part of the window frame and only repaints when told. */
+	DrawMenuBar(g.hwnd);
+}
+
 static void create_menu_bitmaps(void)
 {
 	HBITMAP old[MP_GLYPH_COUNT];
@@ -1415,11 +1529,22 @@ static void on_create(HWND hwnd)
 	g.btn_play = make_child(L"BUTTON", L"Play", BS_PUSHBUTTON | WS_TABSTOP, 0, IDC_BTN_PLAY);
 	g.btn_stop = make_child(L"BUTTON", L"Stop", BS_PUSHBUTTON | WS_TABSTOP, 0, IDC_BTN_STOP);
 	g.btn_next = make_child(L"BUTTON", L"Next", BS_PUSHBUTTON | WS_TABSTOP, 0, IDC_BTN_NEXT);
+	/* Created here, between Next and Add Files, so Tab reaches it in the
+	 * order it appears; the label first, so screen readers name the box
+	 * after it ("Speed"). */
+	g.speed_label = make_child(L"STATIC", L"Speed:", SS_LEFT | SS_NOPREFIX, 0, IDC_SPEED_LABEL);
+	g.speed_box = make_child(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 0, IDC_SPEED);
+	{
+		int i;
+		for (i = 0; i < SPEED_COUNT; i++)
+			SendMessageW(g.speed_box, CB_ADDSTRING, 0, (LPARAM)speed_names[i]);
+	}
 	g.btn_add = make_child(L"BUTTON", L"Add Files...", BS_PUSHBUTTON | WS_TABSTOP, 0, IDC_BTN_ADD);
 	g.btn_playlist = make_child(L"BUTTON", L"Open Playlist...", BS_PUSHBUTTON | WS_TABSTOP, 0, IDC_BTN_PLAYLIST);
 	create_button_icons();
 	/* The class's menu is already attached by the time WM_CREATE arrives. */
 	create_menu_bitmaps();
+	match_menu_bar_to_window();
 
 	g.list = make_child(WC_LISTVIEWW, L"",
 		LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS | WS_TABSTOP, WS_EX_CLIENTEDGE, IDC_LIST);
@@ -1570,6 +1695,12 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		return 0;
 	}
 	case WM_COMMAND:
+		/* The drop-down's notifications carry its ID too; they are told
+		 * apart from menu commands by the notification code. */
+		if ((HWND)lp == g.speed_box && g.speed_box != NULL) {
+			on_speed_box(HIWORD(wp));
+			return 0;
+		}
 		on_command(LOWORD(wp));
 		return 0;
 	case WM_NOTIFY:
@@ -1625,6 +1756,22 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		default: break;
 		}
 		break;
+	case WM_CTLCOLORSTATIC:
+	case WM_CTLCOLORBTN: {
+		/*
+		 * Static text and trackbars (the seek and volume sliders) ask their
+		 * parent for a background brush before painting, and by default
+		 * get the dialog gray (COLOR_BTNFACE): on the white window each
+		 * would sit in a gray box. Answering with the window color makes
+		 * them blend in. Buttons ask too (WM_CTLCOLORBTN); with visual
+		 * styles they paint their corners from the parent's background
+		 * anyway, but in the classic theme this brush fills them.
+		 */
+		HDC dc = (HDC)wp;
+		SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
+		SetBkColor(dc, GetSysColor(COLOR_WINDOW));
+		return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+	}
 	case WM_SYSCOLORCHANGE:
 		create_button_icons();
 		create_menu_bitmaps();
@@ -1692,8 +1839,12 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show)
 	wc.hIconSm = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
 		GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0);
 	wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-	/* The standard dialog face color, like every other Windows utility. */
-	wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+	/* The standard window color (white, unless a high-contrast theme says
+	 * otherwise), so the window matches its menu bar: on Windows 10 and 11
+	 * the theme paints the menu bar white and cannot be told otherwise (see
+	 * match_menu_bar_to_window). The labels and sliders are told to match
+	 * in WM_CTLCOLORSTATIC. */
+	wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
 	wc.lpszMenuName = MAKEINTRESOURCEW(IDR_MAINMENU);
 	wc.lpszClassName = WINDOW_CLASS;
 	if (!RegisterClassExW(&wc))
@@ -1714,13 +1865,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show)
 	/* Full volume: the files play exactly as they are, as before this
 	 * program had a volume control. */
 	set_volume(MP_VOLUME_MAX);
+	set_speed_index(SPEED_NORMAL);
 	update_now_playing();
 
 	/* A comfortable starting size in font units, so it looks the same at
 	 * every DPI. */
 	r.left = 0;
 	r.top = 0;
-	r.right = g.unit * 48;
+	r.right = g.unit * 54;
 	r.bottom = g.unit * 34;
 	AdjustWindowRectEx(&r, WS_OVERLAPPEDWINDOW, TRUE, WS_EX_CONTROLPARENT);
 	SetWindowPos(g.hwnd, NULL, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER);

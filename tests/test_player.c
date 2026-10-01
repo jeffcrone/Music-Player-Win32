@@ -216,6 +216,75 @@ int suite_player(void)
 	CHECK(!mp_player_load(p, L"C:\\nope\\missing.wav", err, 256));
 	CHECK_INT(mp_player_state(p), MP_PLAYER_EMPTY);
 
+	/* Speed: starts at normal, is clamped, and belongs to the player. */
+	CHECK_INT(mp_player_speed(p), 100);
+	mp_player_set_speed(p, 10);
+	CHECK_INT(mp_player_speed(p), 25);
+	mp_player_set_speed(p, 1000);
+	CHECK_INT(mp_player_speed(p), 400);
+
+	/* At 2x, the 1.5 s track's position runs twice as fast, and the track
+	 * ends in about 0.75 s: exactly one end notice, at the full length. */
+	mp_player_set_speed(p, 200);
+	CHECK(mp_player_load(p, path, err, 256));
+	CHECK_INT(mp_player_speed(p), 200);
+	CHECK_INT(mp_player_duration_ms(p), 1500); /* the track's own length */
+	gen = mp_player_generation(p);
+	end_count = 0;
+	mp_player_play(p);
+	pump(300, 0);
+	pos = mp_player_position_ms(p);
+	/* 300 ms of playing is about 600 ms of track; generous margins for
+	 * the device's chunky position reports and a busy machine. */
+	CHECK(pos > 350 && pos < 900);
+	pump(3000, 1);
+	CHECK_INT(end_count, 1);
+	CHECK(end_generation == gen);
+	CHECK_INT(mp_player_position_ms(p), 1500);
+
+	/* At 0.5x the 0.4 s track takes about 0.8 s: still going at 0.5 s. */
+	mp_player_set_speed(p, 50);
+	CHECK(mp_player_load(p, path2, err, 256));
+	end_count = 0;
+	mp_player_play(p);
+	pump(500, 1);
+	CHECK_INT(end_count, 0);
+	CHECK_INT(mp_player_state(p), MP_PLAYER_PLAYING);
+	pos = mp_player_position_ms(p);
+	CHECK(pos > 100 && pos < 380);
+	pump(3000, 1);
+	CHECK_INT(end_count, 1);
+
+	/* Changing speed while paused keeps the place and stays paused. */
+	mp_player_set_speed(p, 100);
+	CHECK(mp_player_load(p, path, err, 256));
+	mp_player_seek_ms(p, 700);
+	CHECK_INT(mp_player_state(p), MP_PLAYER_STOPPED);
+	mp_player_play(p);
+	mp_player_pause(p);
+	pos = mp_player_position_ms(p);
+	mp_player_set_speed(p, 300);
+	CHECK_INT(mp_player_state(p), MP_PLAYER_PAUSED);
+	pos2 = mp_player_position_ms(p);
+	CHECK(pos2 + 20 >= pos && pos2 <= pos + 20);
+	pump(200, 0);
+	CHECK_INT(mp_player_position_ms(p), pos2);
+	/* ...and while playing, keeps going from about the same place. */
+	mp_player_play(p);
+	pump(100, 0);
+	pos = mp_player_position_ms(p);
+	mp_player_set_speed(p, 75);
+	CHECK_INT(mp_player_state(p), MP_PLAYER_PLAYING);
+	pos2 = mp_player_position_ms(p);
+	CHECK(pos2 + 50 >= pos && pos2 <= pos + 50);
+	/* Seeking at a stretched speed lands where asked. */
+	mp_player_seek_ms(p, 200);
+	pos = mp_player_position_ms(p);
+	CHECK(pos >= 190 && pos <= 260);
+	mp_player_stop(p);
+	CHECK_INT(mp_player_position_ms(p), 0);
+	mp_player_set_speed(p, 100);
+
 	/* Unload, and destroying while playing, are both clean. */
 	CHECK(mp_player_load(p, path, err, 256));
 	mp_player_unload(p);

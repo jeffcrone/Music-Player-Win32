@@ -56,5 +56,6 @@ int suite_decoder(void);
 int suite_player(void);
 int suite_volume(void);
 int suite_glyph(void);
+int suite_stretch(void);
 
 #endif

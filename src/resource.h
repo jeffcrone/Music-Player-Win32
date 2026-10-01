@@ -26,6 +26,16 @@
 #define IDM_VOLUME_UP       1106
 #define IDM_VOLUME_DOWN     1107
 #define IDM_MUTE            1108
+/* The nine speeds, in order (main.c's `speeds` table matches). */
+#define IDM_SPEED_25        1120
+#define IDM_SPEED_50        1121
+#define IDM_SPEED_75        1122
+#define IDM_SPEED_100       1123
+#define IDM_SPEED_125       1124
+#define IDM_SPEED_150       1125
+#define IDM_SPEED_175       1126
+#define IDM_SPEED_200       1127
+#define IDM_SPEED_300       1128
 #define IDM_ABOUT           1201
 
 /* Child control IDs. */
@@ -43,5 +53,7 @@
 #define IDC_BTN_PLAYLIST    2106
 #define IDC_VOLUME_LABEL    2007
 #define IDC_VOLUME          2008
+#define IDC_SPEED_LABEL     2009
+#define IDC_SPEED           2010
 
 #endif

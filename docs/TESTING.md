@@ -22,7 +22,7 @@ ctest --test-dir build-x86 --output-on-failure
 A passing run ends like this (about 3 seconds):
 
 ```
-100% tests passed, 0 tests failed out of 12
+100% tests passed, 0 tests failed out of 13
 ```
 
 `--output-on-failure` prints a failing test's output (what it expected and
@@ -31,7 +31,7 @@ build (`MP_BUILD_TESTS=ON`), so `cmake --build` builds them too.
 
 ## What is tested
 
-The unit tests are one program, `mp_tests.exe`, holding eight suites. CTest
+The unit tests are one program, `mp_tests.exe`, holding nine suites. CTest
 runs each suite as its own test, so a failure tells you which area broke.
 Test inputs (MP3, FLAC and WAV files, ID3 tags, playlists) are built byte by
 byte in memory by `tests/builders.c`, so every input is visible in the test
@@ -44,9 +44,10 @@ that uses it. There are no binary fixture files.
 | `track` | `tests/test_track.c` | The display rules (title falls back to the file name, a missing artist stays empty, whitespace counts as missing), file-name extraction, and time formatting from `0:00` up to `1193:02:47`. |
 | `playlist` | `tests/test_playlist.c` | M3U parsing (directives, blank lines, LF/CRLF/CR, padding). Relative, rooted, absolute, UNC and forward-slash paths. `file://` URLs with %-escapes, UNC hosts and the legacy `C\|` form. Stream URLs skipped. UTF-8/UTF-16/ANSI detection. PLS numbering and ordering. Previous/Next stepping and wrap-around. Removing tracks while one is playing. Sorting by track, title, artist and file name, both directions: language-aware and case-insensitive, blanks last either way, stable (including the track-then-artist use of that), the playing track followed, the old-to-new index map, and a 1,000-entry list. Moving a selection as a block to any position (top, end, middle, from both sides, no-ops, bad arguments refused). Move Up/Down: passing unselected neighbors, blocks stuck at either end, selection flags following the entries. `.m3u8` saving with relative paths and a round trip back through the parser. |
 | `decoder` | `tests/test_decoder.c` | Format detection by content (and by extension only as a fallback). Exact sample-for-sample decoding of WAV (8/16/24-bit, float, 6-channel downmix) and FLAC (stereo and mono, multiple frames, seeking), with MP3 checked as known silence (length, seeking, tags at both ends). The workaround for dr_flac's ID3-in-front bug. Error messages for missing, empty, corrupt and unsupported files. |
-| `player` | `tests/test_player.c` | Real playback through waveOut: load, play, pause (position holds), seek while paused, play to the end (exactly one end-of-track notice), replay after the end, stop, replace, unload, and shutting down while playing. The volume: starts at 100, is clamped, survives loads and unloads, and can change mid-play. [Needs a sound device.](#the-playback-tests) |
+| `player` | `tests/test_player.c` | Real playback through waveOut: load, play, pause (position holds), seek while paused, play to the end (exactly one end-of-track notice), replay after the end, stop, replace, unload, and shutting down while playing. The volume: starts at 100, is clamped, survives loads and unloads, and can change mid-play. The speed: clamped, kept across loads, the position running twice as fast at 2x and the track ending in half the time (with one end notice, at its full length), half as fast at 0.5x, a speed change while paused keeping the place and the pause, a change while playing carrying on from the same point, and seeking at a stretched speed. [Needs a sound device.](#the-playback-tests) |
 | `volume` | `tests/test_volume.c` | The software volume. The slider-to-gain curve (exact at 0% and 100%, strictly rising, clamped out of range), and sample scaling: bit-exact at full volume, silence at zero, symmetric rounding for negative samples, no overflow at the 16-bit extremes, and only the given samples touched. Needs no sound device, so it runs on CI too. |
 | `glyph` | `tests/test_glyph.c` | The playback buttons' symbols, pixel by pixel. Stop and Pause exact at 16 px. The color applied to every visible pixel. Margins kept at every size. Previous an exact mirror of Next, and every symbol symmetric top to bottom, from 1 px to 100 px. Areas that scale with the size. Anti-aliased edges. Bad arguments refused without writing anything. The conversion to premultiplied alpha for the menu's bitmaps: rounding, no channel above its alpha, every alpha level. |
+| `stretch` | `tests/test_stretch.c` | The time stretcher, on synthetic tones at every speed from 0.25x to 4x. The output's length scales with 1 / speed. Low (110 Hz), middle and high notes keep their pitch within 1% and their loudness within 10% (resampling would have moved the pitch by the speed factor, and misaligned slices would lose loudness). A silent channel stays exactly silent, and silence stays silence. Full-scale input never wraps to the opposite sign. The same input gives identical output whatever the chunk sizes, including a source that trickles 7 frames at a time. Resets, empty and very short input, clamped speeds, bad arguments. Needs no sound device. |
 | `xpcheck_self_test`, `xp_compat_app`, `xp_compat_tests` | `tests/xpcheck.c` | The Windows XP check, on both `MusicPlayer.exe` and `mp_tests.exe`. Only in XP-compatible (msvcrt) builds. [Details below.](#the-windows-xp-check) |
 | `icons` | `tools/test_make_icons.py` | The icon generator, and that `Music_Icons/` matches it. Only if CMake finds Python. [Details below.](#the-icon-tests) |
 
@@ -95,7 +96,7 @@ Windows Audio service stopped) can't run it. The suite then reports
 **skipped** rather than failed:
 
 ```
-6/12 Test  #6: player ...........................***Skipped   0.01 sec
+6/13 Test  #6: player ...........................***Skipped   0.01 sec
 ```
 
 If it skips on your own PC, check that a playback device is enabled in
@@ -244,14 +245,22 @@ characters in its tags.
     (on Vista and later; on XP that menu is text only), and its Play/Pause
     symbol changes along with the button's. Switch Windows
     to a high contrast theme with the player open: the symbols change
-    color along with the captions.
-17. Tab through the controls. Ctrl+P, Ctrl+S, Ctrl+B, Ctrl+F and the media keys
+    color along with the captions, and the window background, the labels,
+    the sliders and (on XP and the classic theme) the menu bar all take the
+    theme's window color together, with no boxes of another color around
+    the labels or sliders.
+17. Set the **Speed** to 2x while a song plays: it goes faster at the same
+    pitch, straight away, and the time counts up twice as fast. Try 0.5x and
+    3x, from both the drop-down and Playback > Speed (the menu's check mark
+    follows the drop-down). Change the speed while paused: it stays paused
+    in the same place. The speed carries on to the next track.
+18. Tab through the controls. Ctrl+P, Ctrl+S, Ctrl+B, Ctrl+F and the media keys
     work while the window is active.
-18. Play music with World of Warcraft (or any game) running in windowed
+19. Play music with World of Warcraft (or any game) running in windowed
     mode. Alt+Tab between them. Turning the player's volume slider down
     must not change the game's volume (check this on XP too, where a
     shared device volume would be the telltale bug).
-19. At 150% display scaling (Settings > Display > Scale), the window is
+20. At 150% display scaling (Settings > Display > Scale), the window is
     sharp and proportioned, not blurry or cramped, and so are the button
     symbols.
 

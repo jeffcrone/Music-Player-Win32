@@ -69,4 +69,21 @@ UINT mp_player_generation(MpPlayer *p);
 void mp_player_set_volume(MpPlayer *p, int percent);
 int mp_player_volume(MpPlayer *p);
 
+/* Playback speed, as a percentage: 100 is normal, 50 half speed, 200 double
+ * (clamped to MP_STRETCH_MIN_SPEED..MP_STRETCH_MAX_SPEED, 25..400). The
+ * pitch stays the same at every speed (see stretch.h). At exactly 100 the
+ * time stretcher is bypassed, so normal playback is the file's own samples,
+ * unchanged.
+ *
+ * Like the volume, it belongs to the player and carries over from track to
+ * track. Unlike the volume, a change is heard at once: the player
+ * repositions at the current point, which throws away the audio already
+ * queued at the old speed (the same small gap as a seek).
+ *
+ * Positions and durations stay in the track's own time: at 2x a 4-minute
+ * track still shows 4:00 as its length, and its position just advances
+ * twice as fast. */
+void mp_player_set_speed(MpPlayer *p, int percent);
+int mp_player_speed(MpPlayer *p);
+
 #endif

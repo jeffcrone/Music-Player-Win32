@@ -167,6 +167,7 @@ The playback shortcuts are the same as Windows Media Player's.
 | Seek | drag the seek bar, or click it | | Tab to the seek bar, then arrow keys (1%) or Page Up/Down (5%) |
 | Volume up / down | drag the volume slider, or click it | Playback > Volume Up / Volume Down | F10 / F9 (5% a press), or Tab to the volume slider, then arrow keys (5%) or Page Up/Down (20%) |
 | Mute / unmute | | Playback > Mute | F8 |
+| Playback speed | the **Speed** drop-down | Playback > Speed | Tab to the drop-down, then the arrow keys |
 | Open files (replace) | | File > Open Files... | Ctrl+O |
 | Add files | **Add Files...** | File > Add Files... | Ctrl+Shift+O |
 | Open playlist | **Open Playlist...** | File > Open Playlist... | Ctrl+L |
@@ -191,6 +192,19 @@ How playback moves along:
   files exactly as they are. Changing the volume while muted unmutes, at
   the new level. A change takes up to about a third of a second to be
   heard, because that much audio is already queued up ahead.
+- **Speed** can be set to 0.25x, 0.5x, 0.75x, 1x, 1.25x, 1.5x, 1.75x, 2x or
+  3x, from the **Speed** drop-down beside the Next button or from
+  **Playback > Speed**. The pitch stays the same: voices sound like
+  themselves talking faster or slower, not higher or lower. The change is
+  heard straight away, with a gap about as short as a seek's. The speed
+  stays as it is from track to track, and goes back to 1x when the player
+  is started again.
+- At other speeds the times shown are still the track's own: a 4-minute
+  track is 4:00 long at any speed, and its time just counts up faster or
+  slower. At 1x the files play exactly as they are; at other speeds the
+  sound is re-assembled from short slices, which is very clean for speech
+  and most music. Very slow speeds on dense music can sound slightly
+  smeared or echoey, which is the nature of stretching sound that far.
 - When the player moves on by itself, or with Next/Previous, it skips files
   that can't be played (missing, damaged, not really audio) and puts the
   reason in the status bar. Double-clicking such a file just shows the

@@ -9,6 +9,13 @@
  * that is queued. Seeking resets the device (returning all buffers),
  * repositions the decoder and refills.
  *
+ * At any speed other than 100% the decoded audio goes through the time
+ * stretcher (stretch.h) on its way into the buffers. The device then plays
+ * output frames that no longer match track frames one for one, so the
+ * position cannot simply be "where the device is". Instead each buffer
+ * records which track frame it starts at and at what speed, and the
+ * position is worked out from whichever buffer the device is playing.
+ *
  * Why CALLBACK_EVENT rather than a callback function: a waveOut callback
  * runs on a system thread and is not allowed to call other waveOut
  * functions (doing so can deadlock on some drivers), so the refill would
@@ -21,6 +28,7 @@
 #include <string.h>
 
 #include "decoder.h"
+#include "stretch.h"
 #include "text.h"
 #include "volume.h"
 
@@ -48,13 +56,33 @@ struct MpPlayer {
 	MpPlayerState state;
 	int eof;        /* decoder has nothing more to give */
 	int finished;   /* ...and the device has played all of it */
-	uint64_t base_frame; /* track frame at device position 0 */
 	uint32_t rate;
 	uint32_t channels;
 	UINT generation;
 	int volume;    /* percent, 0..100 */
 	uint32_t gain; /* mp_volume_gain(volume), worked out once per change */
+
+	int speed;          /* percent; 100 bypasses the stretcher */
+	MpStretch *stretch; /* for the loaded file's rate and channels */
+	/* Since the last reposition (load, seek, stop, speed change), which
+	 * also zeroes the device's position: */
+	uint64_t reset_frame; /* the track frame playback started from */
+	uint64_t produced;    /* output frames made (decoded or stretched) */
+	uint64_t written;     /* output frames handed to the device */
+	/* Per buffer, what is in it: its first frame's device position and
+	 * track frame, how many frames, and at what speed. */
+	int seg_valid[NUM_BUFFERS];
+	uint64_t seg_dev[NUM_BUFFERS];
+	uint64_t seg_track[NUM_BUFFERS];
+	uint64_t seg_frames[NUM_BUFFERS];
+	int seg_speed[NUM_BUFFERS];
 };
+
+/* The stretcher's input: straight from the decoder. */
+static uint64_t decoder_source(void *ctx, int16_t *buf, uint64_t frames)
+{
+	return mp_decoder_read(((MpPlayer *)ctx)->dec, buf, frames);
+}
 
 /* Refill every buffer the device has finished with. Caller holds the lock. */
 static void service_locked(MpPlayer *p)
@@ -69,10 +97,18 @@ static void service_locked(MpPlayer *p)
 		}
 	}
 	for (i = 0; i < NUM_BUFFERS && !p->eof; i++) {
-		uint64_t got;
+		uint64_t got, track;
+		int16_t *buf = (int16_t *)p->hdr[i].lpData;
 		if (p->queued[i])
 			continue;
-		got = mp_decoder_read(p->dec, (int16_t *)p->hdr[i].lpData, BUFFER_FRAMES);
+		/* Output frame k since the reposition plays track frame
+		 * reset_frame + k * speed / 100 (exact at 100%; within the
+		 * stretcher's 10 ms search otherwise). */
+		track = p->reset_frame + p->produced * (uint64_t)p->speed / 100;
+		if (p->speed == 100)
+			got = mp_decoder_read(p->dec, buf, BUFFER_FRAMES);
+		else
+			got = mp_stretch_process(p->stretch, decoder_source, p, buf, BUFFER_FRAMES);
 		if (got == 0) {
 			p->eof = 1;
 			break;
@@ -89,6 +125,13 @@ static void service_locked(MpPlayer *p)
 		}
 		p->queued[i] = 1;
 		p->nqueued++;
+		p->seg_valid[i] = 1;
+		p->seg_dev[i] = p->written;
+		p->seg_track[i] = track;
+		p->seg_frames[i] = got;
+		p->seg_speed[i] = p->speed;
+		p->produced += got;
+		p->written += got;
 	}
 	if (p->eof && p->nqueued == 0 && p->state == MP_PLAYER_PLAYING) {
 		p->state = MP_PLAYER_STOPPED;
@@ -131,10 +174,15 @@ static void close_device_locked(MpPlayer *p)
 		mp_decoder_close(p->dec);
 		p->dec = NULL;
 	}
+	mp_stretch_destroy(p->stretch);
+	p->stretch = NULL;
 	p->state = MP_PLAYER_EMPTY;
 	p->eof = 0;
 	p->finished = 0;
-	p->base_frame = 0;
+	p->reset_frame = 0;
+	p->produced = 0;
+	p->written = 0;
+	memset(p->seg_valid, 0, sizeof(p->seg_valid));
 }
 
 /* Repositions to `frame`. Keeps the play/pause state. Caller holds the lock. */
@@ -157,10 +205,59 @@ static void seek_locked(MpPlayer *p, uint64_t frame)
 	if (total > 0 && frame > total)
 		frame = total;
 	mp_decoder_seek(p->dec, frame);
-	p->base_frame = frame;
+	p->reset_frame = frame;
+	p->produced = 0;
+	p->written = 0;
+	memset(p->seg_valid, 0, sizeof(p->seg_valid));
+	/* Whatever the stretcher had buffered belongs to the old position. */
+	if (p->stretch != NULL)
+		mp_stretch_reset(p->stretch, p->speed);
 	p->eof = 0;
 	p->finished = 0;
 	service_locked(p);
+}
+
+/* The track frame the device is playing now. Caller holds the lock and
+ * has checked the device is open. */
+static uint64_t track_frame_locked(MpPlayer *p)
+{
+	uint64_t total = mp_decoder_total_frames(p->dec), frame = p->reset_frame, dev = 0;
+	int i, latest = 0, found = 0, have_latest = 0;
+	MMTIME t;
+	if (p->finished)
+		return total;
+	memset(&t, 0, sizeof(t));
+	t.wType = TIME_SAMPLES;
+	if (waveOutGetPosition(p->wo, &t, sizeof(t)) == MMSYSERR_NOERROR) {
+		/* Drivers may answer in another unit than the one asked. */
+		if (t.wType == TIME_SAMPLES)
+			dev = t.u.sample;
+		else if (t.wType == TIME_BYTES)
+			dev = t.u.cb / (p->channels * 2);
+	}
+	/* The buffer holding device position `dev`: the position is its first
+	 * track frame plus how far into it the device is, scaled by its speed. */
+	for (i = 0; i < NUM_BUFFERS; i++) {
+		if (!p->seg_valid[i])
+			continue;
+		if (dev >= p->seg_dev[i] && dev - p->seg_dev[i] < p->seg_frames[i]) {
+			frame = p->seg_track[i] + (dev - p->seg_dev[i]) * (uint64_t)p->seg_speed[i] / 100;
+			found = 1;
+			break;
+		}
+		if (!have_latest || p->seg_dev[i] > p->seg_dev[latest]) {
+			latest = i;
+			have_latest = 1;
+		}
+	}
+	/* Past every buffer (they have all played, the device is waiting for
+	 * more): the end of the last one. Before any (nothing queued yet):
+	 * where playback started, which is `frame`'s starting value. */
+	if (!found && have_latest && dev >= p->seg_dev[latest])
+		frame = p->seg_track[latest] + p->seg_frames[latest] * (uint64_t)p->seg_speed[latest] / 100;
+	if (total > 0 && frame > total)
+		frame = total;
+	return frame;
 }
 
 MpPlayer *mp_player_create(HWND notify_hwnd, UINT notify_msg)
@@ -174,6 +271,8 @@ MpPlayer *mp_player_create(HWND notify_hwnd, UINT notify_msg)
 	/* Not left at calloc's zero, which would be silence. */
 	p->volume = MP_VOLUME_MAX;
 	p->gain = MP_VOLUME_UNITY;
+	/* Nor at zero speed. */
+	p->speed = 100;
 	/* Auto-reset: one wake-up services every finished buffer, so there is
 	 * nothing to lose if several completions collapse into one signal. */
 	p->event = CreateEventW(NULL, FALSE, FALSE, NULL);
@@ -272,6 +371,18 @@ int mp_player_load(MpPlayer *p, const wchar_t *path, wchar_t *err, size_t err_ca
 		waveOutPrepareHeader(p->wo, &p->hdr[i], sizeof(WAVEHDR));
 	}
 
+	/* Made for every file, even at 100%, so a later speed change never has
+	 * to allocate (or fail) in the middle of playback. */
+	p->stretch = mp_stretch_create(p->rate, p->channels);
+	if (p->stretch == NULL) {
+		mp_wcopy(err, err_cap, L"Out of memory.");
+		p->dec = dec;
+		close_device_locked(p);
+		LeaveCriticalSection(&p->lock);
+		return 0;
+	}
+	mp_stretch_reset(p->stretch, p->speed);
+
 	p->dec = dec;
 	p->state = MP_PLAYER_STOPPED;
 	p->generation++;
@@ -343,28 +454,10 @@ MpPlayerState mp_player_state(MpPlayer *p)
 
 uint32_t mp_player_position_ms(MpPlayer *p)
 {
-	uint64_t frame = 0, total;
+	uint64_t frame = 0;
 	EnterCriticalSection(&p->lock);
-	if (p->wo != NULL) {
-		total = mp_decoder_total_frames(p->dec);
-		if (p->finished) {
-			frame = total;
-		} else {
-			MMTIME t;
-			memset(&t, 0, sizeof(t));
-			t.wType = TIME_SAMPLES;
-			frame = p->base_frame;
-			if (waveOutGetPosition(p->wo, &t, sizeof(t)) == MMSYSERR_NOERROR) {
-				/* Drivers may answer in another unit than the one asked. */
-				if (t.wType == TIME_SAMPLES)
-					frame += t.u.sample;
-				else if (t.wType == TIME_BYTES)
-					frame += t.u.cb / (p->channels * 2);
-			}
-		}
-		if (total > 0 && frame > total)
-			frame = total;
-	}
+	if (p->wo != NULL)
+		frame = track_frame_locked(p);
 	LeaveCriticalSection(&p->lock);
 	return p->rate ? (uint32_t)(frame * 1000 / p->rate) : 0;
 }
@@ -401,6 +494,35 @@ int mp_player_volume(MpPlayer *p)
 	int v;
 	EnterCriticalSection(&p->lock);
 	v = p->volume;
+	LeaveCriticalSection(&p->lock);
+	return v;
+}
+
+void mp_player_set_speed(MpPlayer *p, int percent)
+{
+	if (percent < MP_STRETCH_MIN_SPEED)
+		percent = MP_STRETCH_MIN_SPEED;
+	if (percent > MP_STRETCH_MAX_SPEED)
+		percent = MP_STRETCH_MAX_SPEED;
+	EnterCriticalSection(&p->lock);
+	if (percent != p->speed) {
+		/* Where we are, worked out at the old speed before changing it. */
+		uint64_t frame = p->wo != NULL ? track_frame_locked(p) : 0;
+		p->speed = percent;
+		/* Restart from here at the new speed. A finished track is left
+		 * alone: nothing is queued, and Play starts it over from the top
+		 * (at the new speed) anyway. */
+		if (p->wo != NULL && !p->finished)
+			seek_locked(p, frame);
+	}
+	LeaveCriticalSection(&p->lock);
+}
+
+int mp_player_speed(MpPlayer *p)
+{
+	int v;
+	EnterCriticalSection(&p->lock);
+	v = p->speed;
 	LeaveCriticalSection(&p->lock);
 	return v;
 }
