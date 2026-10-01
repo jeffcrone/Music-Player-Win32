@@ -9,7 +9,7 @@ cmake_minimum_required(VERSION 3.16)
 # the exe's version resource are generated from it, and the GitHub Release
 # workflow cuts a release (tag + GitHub release) whenever a push to main
 # changes it. Bump it here and nowhere else.
-project(MusicPlayer VERSION 0.2.0 LANGUAGES C RC)
+project(MusicPlayer VERSION 0.3.0 LANGUAGES C RC)
 
 if(NOT WIN32 OR NOT MINGW)
 	message(FATAL_ERROR

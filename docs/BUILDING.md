@@ -202,7 +202,7 @@ easier thing to debug.
 Edit the one line at the top of `CMakeLists.txt`:
 
 ```cmake
-project(MusicPlayer VERSION 0.2.0 LANGUAGES C RC)
+project(MusicPlayer VERSION 0.3.0 LANGUAGES C RC)
 ```
 
 Everything else follows from it: the exe's version resource (Explorer's
