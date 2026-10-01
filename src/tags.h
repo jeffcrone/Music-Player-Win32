@@ -17,6 +17,11 @@
  *     holding an ID3v2 tag, which is how many taggers store tags in WAV
  *     files.
  *
+ * Embedded pictures (album art) come from ID3v2 APIC (v2.2 PIC) frames,
+ * wherever the ID3v2 tag is, and FLAC PICTURE blocks. They are only read
+ * when asked for (mp_tags_read_picture_*): reading tags for a playlist
+ * full of files never loads megabytes of cover art.
+ *
  * Only the few bytes that matter are read: embedded cover art, which can be
  * megabytes, is skipped over with a seek rather than loaded.
  *
@@ -64,5 +69,23 @@ int mp_tags_read_file(const wchar_t *path, MpTags *tags);
  * other text, or a number above MP_TRACK_MAX.
  */
 unsigned mp_tags_parse_track(const wchar_t *text);
+
+/* Largest embedded picture read, in bytes. Real cover art is well under
+ * this; anything bigger is skipped rather than loaded. */
+#define MP_PICTURE_MAX (16u * 1024u * 1024u)
+
+/*
+ * Finds the file's embedded album art and returns its bytes (a JPEG, PNG
+ * or other image file's contents, exactly as embedded) in a malloc'd
+ * *data of *size bytes. Returns 0 if there is none.
+ *
+ * Files can embed several pictures (back cover, artist photo, ...). The
+ * front cover is preferred wherever it is; failing that, the first picture
+ * found. Sources are tried in the same order as the text tags: an ID3v2
+ * tag at the start of the file, then the format's own (FLAC PICTURE block,
+ * WAV "id3 " chunk).
+ */
+int mp_tags_read_picture_stream(MpStream *s, uint8_t **data, size_t *size);
+int mp_tags_read_picture_file(const wchar_t *path, uint8_t **data, size_t *size);
 
 #endif

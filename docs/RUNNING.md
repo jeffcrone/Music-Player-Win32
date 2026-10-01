@@ -133,6 +133,16 @@ At the top of the window:
 - **Artist:** the artist from the metadata. If there is none, the line is
   left blank. When a file has an "album artist" but no track artist, the
   album artist is shown.
+- The **album art**, in a square to the left of the title. It comes from
+  the picture embedded in the file (MP3 and WAV ID3 tags, FLAC picture
+  blocks), and if there is none, from an image in the track's folder:
+  `cover`, `folder`, `front`, `album` or `albumart` as `.jpg`, `.jpeg` or
+  `.png` (in that order, any capitalization), then the
+  `AlbumArt_..._Large.jpg` / `AlbumArtSmall.jpg` files Windows Media Player
+  leaves behind. When a file has several pictures, the front cover is used.
+  JPEG, PNG, BMP and GIF pictures are shown; a wide or tall picture is
+  centered with blank bands beside it. With no art (or nothing playing) the
+  square shows a music note instead.
 - The **seek bar** and **elapsed / total time**.
 - The **volume** slider, labeled with the current level ("Volume 80%"), or
   "Muted".

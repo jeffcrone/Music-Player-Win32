@@ -1119,6 +1119,378 @@ static void track_from_wav(void)
 	buf_free(&file);
 }
 
+/* ---- Embedded pictures -------------------------------------------------- */
+
+/* Reads the embedded picture from an in-memory file. */
+static int read_pic(const Buf *b, uint8_t **data, size_t *size)
+{
+	MpStream *s = mp_stream_open_memory(b->data, b->len);
+	int found = mp_tags_read_picture_stream(s, data, size);
+	mp_stream_close(s);
+	return found;
+}
+
+/* Whether the picture found is exactly `want` (n bytes). Frees it. */
+static int pic_is(uint8_t *data, size_t size, const void *want, size_t n)
+{
+	int same = data != NULL && size == n && memcmp(data, want, n) == 0;
+	free(data);
+	return same;
+}
+
+/* An APIC frame's content: encoding, MIME type, picture type, a Latin-1
+ * description, then the image bytes. */
+static void apic(Buf *out, uint8_t type, const char *desc, const void *img, size_t n)
+{
+	buf_u8(out, 0);
+	buf_str(out, "image/jpeg");
+	buf_u8(out, 0);
+	buf_u8(out, type);
+	buf_str(out, desc);
+	buf_u8(out, 0);
+	buf_bytes(out, img, n);
+}
+
+static void picture_id3v2(void)
+{
+	Buf content, frames, file;
+	uint8_t *data;
+	size_t size;
+	/* Image bytes that start with a zero and contain 0xFF 0x00 pairs, to
+	 * catch both a description scan that runs into the image and an
+	 * unsynchronization that is undone where it should not be. */
+	static const uint8_t img[] = { 0x00, 0xFF, 0xD8, 0xFF, 0x00, 'J', 'P', 'G', 0x00, 0x7F };
+
+	/* v2.3, Latin-1 description, front cover; the title still reads. */
+	buf_init(&content);
+	buf_init(&frames);
+	buf_init(&file);
+	apic(&content, 3, "Front", img, sizeof(img));
+	id3_frame(&frames, 3, "TIT2", 0, 0, "Song", 4);
+	id3_raw_frame(&frames, 3, "APIC", 0, content.data, content.len);
+	mp3_with_tag(&file, 3, 0, &frames);
+	CHECK(read_pic(&file, &data, &size));
+	CHECK(pic_is(data, size, img, sizeof(img)));
+	{
+		MpTags t;
+		CHECK(read_tags(&file, &t));
+		CHECK_WSTR(t.title, L"Song");
+	}
+	buf_free(&content);
+	buf_free(&frames);
+	buf_free(&file);
+
+	/* UTF-16 description: ended by a 16-bit NUL on a 2-byte boundary. "A"
+	 * is 0x41 0x00 in UTF-16LE, a zero byte that must not end it. */
+	buf_init(&content);
+	buf_init(&frames);
+	buf_init(&file);
+	buf_u8(&content, 1);
+	buf_str(&content, "image/png");
+	buf_u8(&content, 0);
+	buf_u8(&content, 3);
+	buf_bytes(&content, "\xFF\xFE" "A\0" "\0\0", 6);
+	buf_bytes(&content, img, sizeof(img));
+	id3_raw_frame(&frames, 4, "APIC", 0, content.data, content.len);
+	mp3_with_tag(&file, 4, 0, &frames);
+	CHECK(read_pic(&file, &data, &size));
+	CHECK(pic_is(data, size, img, sizeof(img)));
+	buf_free(&content);
+	buf_free(&frames);
+	buf_free(&file);
+
+	/* v2.2's PIC: a 3-letter format instead of a MIME type. */
+	buf_init(&content);
+	buf_init(&frames);
+	buf_init(&file);
+	buf_u8(&content, 0);
+	buf_str(&content, "JPG");
+	buf_u8(&content, 3);
+	buf_u8(&content, 0); /* empty description */
+	buf_bytes(&content, img, sizeof(img));
+	id3_raw_frame(&frames, 2, "PIC", 0, content.data, content.len);
+	mp3_with_tag(&file, 2, 0, &frames);
+	CHECK(read_pic(&file, &data, &size));
+	CHECK(pic_is(data, size, img, sizeof(img)));
+	buf_free(&content);
+	buf_free(&frames);
+	buf_free(&file);
+
+	/* v2.4 with a data length indicator and frame unsynchronization (flags
+	 * 0x0003): 4 syncsafe bytes first, then content in which every 0xFF
+	 * is followed by an inserted 0x00. Undone, the image comes back. */
+	buf_init(&content);
+	buf_init(&frames);
+	buf_init(&file);
+	{
+		Buf raw, enc;
+		size_t i;
+		buf_init(&raw);
+		buf_init(&enc);
+		apic(&raw, 3, "", img, sizeof(img));
+		buf_syncsafe(&enc, (uint32_t)raw.len);
+		for (i = 0; i < raw.len; i++) {
+			buf_u8(&enc, raw.data[i]);
+			if (raw.data[i] == 0xFF)
+				buf_u8(&enc, 0x00);
+		}
+		id3_raw_frame(&frames, 4, "APIC", 0x0003, enc.data, enc.len);
+		buf_free(&raw);
+		buf_free(&enc);
+	}
+	mp3_with_tag(&file, 4, 0, &frames);
+	CHECK(read_pic(&file, &data, &size));
+	CHECK(pic_is(data, size, img, sizeof(img)));
+	buf_free(&content);
+	buf_free(&frames);
+	buf_free(&file);
+}
+
+static void picture_choice(void)
+{
+	Buf content, frames, file;
+	uint8_t *data;
+	size_t size;
+
+	/* Back cover first, front cover second: the front cover wins. */
+	buf_init(&frames);
+	buf_init(&file);
+	buf_init(&content);
+	apic(&content, 4, "back", "BACK", 4);
+	id3_raw_frame(&frames, 3, "APIC", 0, content.data, content.len);
+	buf_free(&content);
+	buf_init(&content);
+	apic(&content, 3, "front", "FRONT", 5);
+	id3_raw_frame(&frames, 3, "APIC", 0, content.data, content.len);
+	buf_free(&content);
+	buf_init(&content);
+	apic(&content, 3, "second front", "FRONT2", 6);
+	id3_raw_frame(&frames, 3, "APIC", 0, content.data, content.len);
+	mp3_with_tag(&file, 3, 0, &frames);
+	CHECK(read_pic(&file, &data, &size));
+	/* ...and the first front cover, not a later one. */
+	CHECK(pic_is(data, size, "FRONT", 5));
+	buf_free(&content);
+	buf_free(&frames);
+	buf_free(&file);
+
+	/* No front cover at all: the first picture there is. */
+	buf_init(&frames);
+	buf_init(&file);
+	buf_init(&content);
+	apic(&content, 8, "artist", "ARTIST", 6);
+	id3_raw_frame(&frames, 3, "APIC", 0, content.data, content.len);
+	buf_free(&content);
+	buf_init(&content);
+	apic(&content, 4, "back", "BACK", 4);
+	id3_raw_frame(&frames, 3, "APIC", 0, content.data, content.len);
+	mp3_with_tag(&file, 3, 0, &frames);
+	CHECK(read_pic(&file, &data, &size));
+	CHECK(pic_is(data, size, "ARTIST", 6));
+	buf_free(&content);
+	buf_free(&frames);
+	buf_free(&file);
+}
+
+static void picture_missing_or_broken(void)
+{
+	Buf content, frames, file;
+	uint8_t *data = (uint8_t *)1;
+	size_t size = 99;
+
+	/* No tag at all. */
+	buf_init(&file);
+	mp3_silence(&file, 2);
+	CHECK(!read_pic(&file, &data, &size));
+	CHECK(data == NULL);
+	CHECK_INT(size, 0);
+	buf_free(&file);
+	CHECK(!mp_tags_read_picture_stream(NULL, &data, &size));
+
+	/* Compressed (v2.3 flag 0x0080): skipped, not misread. */
+	buf_init(&content);
+	buf_init(&frames);
+	buf_init(&file);
+	apic(&content, 3, "", "IMG", 3);
+	id3_raw_frame(&frames, 3, "APIC", 0x0080, content.data, content.len);
+	mp3_with_tag(&file, 3, 0, &frames);
+	CHECK(!read_pic(&file, &data, &size));
+	buf_free(&content);
+	buf_free(&frames);
+	buf_free(&file);
+
+	/* Frames that end before the image: no MIME terminator, nothing after
+	 * the description, and a lone encoding byte. */
+	{
+		static const char *const broken[] = { "\0image/jpeg", "\0image/jpeg\0\3desc\0", "\0" };
+		static const size_t lens[] = { 11, 18, 1 };
+		int i;
+		for (i = 0; i < 3; i++) {
+			buf_init(&frames);
+			buf_init(&file);
+			id3_raw_frame(&frames, 3, "APIC", 0, broken[i], lens[i]);
+			mp3_with_tag(&file, 3, 0, &frames);
+			CHECK(!read_pic(&file, &data, &size));
+			buf_free(&frames);
+			buf_free(&file);
+		}
+	}
+
+	/* A UTF-16 description that never ends runs out at the frame's end. */
+	buf_init(&frames);
+	buf_init(&file);
+	id3_raw_frame(&frames, 3, "APIC", 0, "\1image/png\0\3\xFF\xFE" "A\0B\0C", 19);
+	mp3_with_tag(&file, 3, 0, &frames);
+	CHECK(!read_pic(&file, &data, &size));
+	buf_free(&frames);
+	buf_free(&file);
+}
+
+/* Inserts a FLAC metadata block (not the last one) straight after
+ * STREAMINFO, which flac_file always writes first: 4 bytes of "fLaC", 4 of
+ * block header, 34 of STREAMINFO. */
+static void flac_insert_block(Buf *file, uint8_t type, const Buf *body)
+{
+	Buf out;
+	buf_init(&out);
+	buf_bytes(&out, file->data, 42);
+	buf_u8(&out, type);
+	buf_be24(&out, (uint32_t)body->len);
+	buf_bytes(&out, body->data, body->len);
+	buf_bytes(&out, file->data + 42, file->len - 42);
+	buf_free(file);
+	*file = out;
+}
+
+/* A FLAC PICTURE block's content. */
+static void flac_pic(Buf *out, uint32_t type, const void *img, size_t n)
+{
+	buf_be32(out, type);
+	buf_be32(out, 9);
+	buf_str(out, "image/png");
+	buf_be32(out, 5);
+	buf_str(out, "Cover");
+	buf_be32(out, 600);  /* width */
+	buf_be32(out, 600);  /* height */
+	buf_be32(out, 24);   /* color depth */
+	buf_be32(out, 0);    /* colors (not paletted) */
+	buf_be32(out, (uint32_t)n);
+	buf_bytes(out, img, n);
+}
+
+static void picture_flac_and_wav(void)
+{
+	static const char *const fields[] = { "TITLE=Flac" };
+	Buf block, file, frames, tag, extra, content;
+	uint8_t *data;
+	size_t size;
+	static const int16_t pcm[4] = { 0 };
+
+	/* A FLAC PICTURE block; the comment after it still reads. */
+	buf_init(&block);
+	buf_init(&file);
+	flac_with_comment(&file, fields, 1);
+	flac_pic(&block, 3, "PNGDATA", 7);
+	flac_insert_block(&file, 6, &block);
+	CHECK(read_pic(&file, &data, &size));
+	CHECK(pic_is(data, size, "PNGDATA", 7));
+	{
+		MpTags t;
+		read_tags(&file, &t);
+		CHECK_WSTR(t.title, L"Flac");
+	}
+	buf_free(&block);
+	buf_free(&file);
+
+	/* A data length running past the block: refused. */
+	buf_init(&block);
+	buf_init(&file);
+	flac_with_comment(&file, fields, 1);
+	flac_pic(&block, 3, "PNGDATA", 7);
+	block.data[block.len - 7 - 1] = 200; /* data length's low byte */
+	flac_insert_block(&file, 6, &block);
+	CHECK(!read_pic(&file, &data, &size));
+	buf_free(&block);
+	buf_free(&file);
+
+	/* ID3v2 in front of a FLAC with a back cover; the FLAC block has the
+	 * front cover. The front cover wins, wherever it is. */
+	buf_init(&block);
+	buf_init(&file);
+	buf_init(&frames);
+	buf_init(&tag);
+	buf_init(&content);
+	apic(&content, 4, "", "BACK", 4);
+	id3_raw_frame(&frames, 3, "APIC", 0, content.data, content.len);
+	id3_tag(&tag, 3, 0, &frames, 0);
+	flac_with_comment(&file, fields, 1);
+	flac_pic(&block, 3, "FRONT", 5);
+	flac_insert_block(&file, 6, &block);
+	buf_bytes(&tag, file.data, file.len);
+	CHECK(read_pic(&tag, &data, &size));
+	CHECK(pic_is(data, size, "FRONT", 5));
+	/* Both front covers: the earlier source (the ID3v2 tag) wins. */
+	buf_free(&content);
+	buf_init(&content);
+	buf_free(&frames);
+	buf_init(&frames);
+	buf_free(&tag);
+	buf_init(&tag);
+	apic(&content, 3, "", "ID3FRONT", 8);
+	id3_raw_frame(&frames, 3, "APIC", 0, content.data, content.len);
+	id3_tag(&tag, 3, 0, &frames, 0);
+	buf_bytes(&tag, file.data, file.len);
+	CHECK(read_pic(&tag, &data, &size));
+	CHECK(pic_is(data, size, "ID3FRONT", 8));
+	buf_free(&block);
+	buf_free(&file);
+	buf_free(&frames);
+	buf_free(&tag);
+	buf_free(&content);
+
+	/* WAV with the picture in its "id3 " chunk. */
+	buf_init(&content);
+	buf_init(&frames);
+	buf_init(&tag);
+	buf_init(&extra);
+	buf_init(&file);
+	apic(&content, 3, "", "WAVPIC", 6);
+	id3_raw_frame(&frames, 3, "APIC", 0, content.data, content.len);
+	id3_tag(&tag, 3, 0, &frames, 0);
+	riff_chunk(&extra, "id3 ", tag.data, tag.len);
+	wav_file(&file, 1, 2, 44100, 16, pcm, sizeof(pcm), &extra);
+	CHECK(read_pic(&file, &data, &size));
+	CHECK(pic_is(data, size, "WAVPIC", 6));
+	buf_free(&content);
+	buf_free(&frames);
+	buf_free(&tag);
+	buf_free(&extra);
+	buf_free(&file);
+}
+
+static void picture_from_disk(void)
+{
+	Buf content, frames, file;
+	wchar_t path[MAX_PATH];
+	uint8_t *data;
+	size_t size;
+	buf_init(&content);
+	buf_init(&frames);
+	buf_init(&file);
+	apic(&content, 3, "", "ONDISK", 6);
+	id3_raw_frame(&frames, 3, "APIC", 0, content.data, content.len);
+	mp3_with_tag(&file, 3, 0, &frames);
+	CHECK(temp_file(&file, L".mp3", path, MAX_PATH));
+	CHECK(mp_tags_read_picture_file(path, &data, &size));
+	CHECK(pic_is(data, size, "ONDISK", 6));
+	DeleteFileW(path);
+	CHECK(!mp_tags_read_picture_file(path, &data, &size));
+	CHECK(data == NULL);
+	buf_free(&content);
+	buf_free(&frames);
+	buf_free(&file);
+}
+
 int suite_tags(void)
 {
 	id3v23_latin1();
@@ -1148,5 +1520,10 @@ int suite_tags(void)
 	track_from_id3v1();
 	track_from_flac();
 	track_from_wav();
+	picture_id3v2();
+	picture_choice();
+	picture_missing_or_broken();
+	picture_flac_and_wav();
+	picture_from_disk();
 	return 0;
 }

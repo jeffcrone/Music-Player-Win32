@@ -64,11 +64,15 @@ add_library(mpcore STATIC
 	src/volume.c
 	src/glyph.c
 	src/stretch.c
+	src/image.c
+	src/art.c
 	src/dr_libs_impl.c
+	src/stb_image_impl.c
 )
 target_include_directories(mpcore PUBLIC
 	src
 	third_party/dr_libs
+	third_party/stb
 	"${CMAKE_BINARY_DIR}/generated"
 )
 # _WIN32_WINNT/WINVER 0x0501 = Windows XP. With these, the Windows headers
@@ -86,7 +90,7 @@ target_compile_definitions(mpcore PUBLIC
 # Warnings for our C code only (windres does not understand -Wall).
 target_compile_options(mpcore PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra>)
 # The vendored decoders are not ours to fix; silence their warnings.
-set_source_files_properties(src/dr_libs_impl.c PROPERTIES COMPILE_OPTIONS "-w")
+set_source_files_properties(src/dr_libs_impl.c src/stb_image_impl.c PROPERTIES COMPILE_OPTIONS "-w")
 target_link_libraries(mpcore PUBLIC winmm)
 
 # Link flags shared by every executable.
@@ -138,13 +142,14 @@ if(MP_BUILD_TESTS)
 		tests/test_volume.c
 		tests/test_glyph.c
 		tests/test_stretch.c
+		tests/test_image.c
 	)
 	target_include_directories(mp_tests PRIVATE tests)
 	target_link_libraries(mp_tests PRIVATE mpcore user32)
 	mp_executable_settings(mp_tests)
 
 	# One CTest test per suite, so a failure names the area that broke.
-	foreach(suite text tags track playlist decoder player volume glyph stretch)
+	foreach(suite text tags track playlist decoder player volume glyph stretch image)
 		add_test(NAME ${suite} COMMAND mp_tests ${suite})
 	endforeach()
 	# Exit code 77 = skipped. The player suite needs a real audio output

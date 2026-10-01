@@ -132,6 +132,7 @@ jobs:
           Copy-Item build/MusicPlayer.exe, README.md, LICENSE "dist/$name/"
           Copy-Item docs/RUNNING.md "dist/$name/RUNNING.md"
           Copy-Item third_party/dr_libs/LICENSE "dist/$name/LICENSE-dr_libs.txt"
+          Copy-Item third_party/stb/LICENSE "dist/$name/LICENSE-stb_image.txt"
           Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip" -Force
 
       - uses: actions/upload-artifact@v4

@@ -19,8 +19,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "art.h"
 #include "decoder.h"
 #include "glyph.h"
+#include "image.h"
 #include "player.h"
 #include "playlist.h"
 #include "resource.h"
@@ -69,6 +71,18 @@ typedef struct {
 	HWND btn_prev, btn_play, btn_stop, btn_next;
 	HFONT font, title_font, bold_font;
 	HICON icons[MP_GLYPH_COUNT]; /* the playback buttons' symbols */
+
+	/* Album art: the square at the top left. art_bmp is the current
+	 * track's picture already scaled to art_size, or NULL to show the
+	 * placeholder (art_icon, the app's music note). art_generation is the
+	 * player generation (see mp_player_generation) it was made for, so the
+	 * picture is only read again when a different track is loaded. */
+	HWND art;
+	HBITMAP art_bmp;
+	HICON art_icon;
+	int art_size;
+	int art_loaded;
+	UINT art_generation;
 	int icon_size;
 	/* The same symbols for the Playback menu. All NULL on Windows XP, which
 	 * shows that menu as text only (see create_menu_bitmaps). */
@@ -220,6 +234,92 @@ static int add_playlist_file(const wchar_t *path)
 
 /* ---- Now playing -------------------------------------------------------- */
 
+/* A 32-bit top-down DIB holding `px` (size x size, 0x00RRGGBB). */
+static HBITMAP make_art_bitmap(const uint32_t *px, int size)
+{
+	BITMAPINFO bi;
+	void *bits = NULL;
+	HBITMAP bmp;
+	memset(&bi, 0, sizeof(bi));
+	bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+	bi.bmiHeader.biWidth = size;
+	bi.bmiHeader.biHeight = -size; /* negative = top row first */
+	bi.bmiHeader.biPlanes = 1;
+	bi.bmiHeader.biBitCount = 32;
+	bi.bmiHeader.biCompression = BI_RGB;
+	bmp = CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+	if (bmp != NULL && bits != NULL)
+		memcpy(bits, px, (size_t)size * size * sizeof(uint32_t));
+	return bmp;
+}
+
+/*
+ * Shows the loaded track's album art, or the placeholder when nothing is
+ * loaded or the track has no art. Cheap to call often: unless `force`d it
+ * does nothing while the same track stays loaded (reordering the list,
+ * adding files and so on leave the picture alone). `force` is for when the
+ * colors change, since the picture's margins are drawn in the window color.
+ *
+ * The picture is read and decoded here, on the UI thread, when a track
+ * starts. That is quick for normal cover art (a few milliseconds for a
+ * 1000-pixel JPEG); a huge scan can take longer, and the window then
+ * pauses for that moment. The music itself plays on its own thread and is
+ * not affected.
+ */
+static void refresh_art(int force)
+{
+	int loaded = g.pl.current != MP_NONE && g.pl.current < g.pl.count &&
+		mp_player_state(g.player) != MP_PLAYER_EMPTY;
+	UINT generation = mp_player_generation(g.player);
+	if (!force && loaded == g.art_loaded && (!loaded || generation == g.art_generation))
+		return;
+	g.art_loaded = loaded;
+	g.art_generation = generation;
+	if (g.art_bmp != NULL) {
+		DeleteObject(g.art_bmp);
+		g.art_bmp = NULL;
+	}
+	if (loaded) {
+		uint8_t *data = NULL;
+		size_t size = 0;
+		if (mp_art_load(g.pl.items[g.pl.current].path, &data, &size)) {
+			COLORREF bg = GetSysColor(COLOR_WINDOW);
+			uint32_t *px = mp_image_thumbnail(data, size, g.art_size,
+				(uint32_t)GetRValue(bg) << 16 | (uint32_t)GetGValue(bg) << 8 | GetBValue(bg));
+			/* A picture that cannot be decoded (a format we do not read,
+			 * or a damaged one) just leaves the placeholder. */
+			if (px != NULL) {
+				g.art_bmp = make_art_bitmap(px, g.art_size);
+				free(px);
+			}
+		}
+		free(data);
+	}
+	InvalidateRect(g.art, NULL, FALSE);
+}
+
+/* WM_DRAWITEM for the art square: the picture, or the placeholder - a
+ * plain square in the button-face color with the music note in the middle,
+ * so the layout stays the same with or without art. */
+static void draw_art(const DRAWITEMSTRUCT *di)
+{
+	RECT r = di->rcItem;
+	int w = r.right - r.left, h = r.bottom - r.top;
+	if (g.art_bmp != NULL) {
+		HDC mem = CreateCompatibleDC(di->hDC);
+		HGDIOBJ old = SelectObject(mem, g.art_bmp);
+		BitBlt(di->hDC, r.left, r.top, w, h, mem, 0, 0, SRCCOPY);
+		SelectObject(mem, old);
+		DeleteDC(mem);
+	} else {
+		int icon = g.art_size / 2;
+		FillRect(di->hDC, &r, GetSysColorBrush(COLOR_BTNFACE));
+		if (g.art_icon != NULL)
+			DrawIconEx(di->hDC, r.left + (w - icon) / 2, r.top + (h - icon) / 2, g.art_icon,
+				icon, icon, 0, NULL, DI_NORMAL);
+	}
+}
+
 static void set_menu_bitmap(UINT id, HBITMAP bmp);
 
 static void update_play_button(int force)
@@ -296,6 +396,7 @@ static void update_now_playing(void)
 	InvalidateRect(g.list, NULL, FALSE);
 	update_position();
 	update_play_button(1);
+	refresh_art(0);
 }
 
 /* Loads and starts one track. On failure shows why in the status bar. */
@@ -1138,6 +1239,8 @@ static void cmd_about(void)
 		L"Plays MP3, FLAC and WAV files and M3U, M3U8 and PLS playlists.\n\n"
 		L"Audio decoding by dr_mp3, dr_flac and dr_wav by David Reid "
 		L"(public domain / MIT No Attribution).\n\n"
+		L"Album art decoding by stb_image by Sean Barrett "
+		L"(public domain / MIT).\n\n"
 		L"Copyright (c) 2026 jeffcrone. MIT No Attribution License.",
 		L"About " APP_NAME, MB_OK | MB_ICONINFORMATION);
 }
@@ -1250,7 +1353,7 @@ static void layout(void)
 {
 	RECT rc, sr;
 	int m = g.unit * 2 / 3, gap = g.unit / 2;
-	int x, y, w, h, status_h, btn_h, time_w, vl_w, vb_w, seek_w;
+	int x, y, w, h, status_h, btn_h, time_w, vl_w, vb_w, seek_w, xt, wt;
 	int wp = icon_button_width(L"Previous"), wplay = icon_button_width(L"Pause");
 	int ws = icon_button_width(L"Stop"), wn = icon_button_width(L"Next");
 
@@ -1263,9 +1366,15 @@ static void layout(void)
 	w = rc.right - 2 * m;
 	x = m;
 	y = m;
-	MoveWindow(g.title, x, y, w, g.title_height, TRUE);
+	/* The album art square at the top left, exactly as tall as the title,
+	 * artist and seek rows; those three rows sit to its right (from xt,
+	 * wt wide). The buttons and the list below keep the full width. */
+	MoveWindow(g.art, x, y, g.art_size, g.art_size, TRUE);
+	xt = x + g.art_size + gap;
+	wt = w - g.art_size - gap;
+	MoveWindow(g.title, xt, y, wt, g.title_height, TRUE);
 	y += g.title_height;
-	MoveWindow(g.artist, x, y, w, g.unit + 2, TRUE);
+	MoveWindow(g.artist, xt, y, wt, g.unit + 2, TRUE);
 	y += g.unit + 2 + gap;
 
 	/* The seek row: seek bar (taking whatever width is left), time, then
@@ -1274,12 +1383,12 @@ static void layout(void)
 	time_w = time_width();
 	vl_w = volume_label_width();
 	vb_w = volume_bar_width();
-	seek_w = w - time_w - vl_w - vb_w;
+	seek_w = wt - time_w - vl_w - vb_w;
 	h = g.unit * 2;
-	MoveWindow(g.seek, x, y, seek_w > 0 ? seek_w : 0, h, TRUE);
-	MoveWindow(g.time, x + seek_w, y + (h - g.unit) / 2, time_w, g.unit + 2, TRUE);
-	MoveWindow(g.vol_label, x + seek_w + time_w, y + (h - g.unit) / 2, vl_w, g.unit + 2, TRUE);
-	MoveWindow(g.vol_bar, x + w - vb_w, y, vb_w, h, TRUE);
+	MoveWindow(g.seek, xt, y, seek_w > 0 ? seek_w : 0, h, TRUE);
+	MoveWindow(g.time, xt + seek_w, y + (h - g.unit) / 2, time_w, g.unit + 2, TRUE);
+	MoveWindow(g.vol_label, xt + seek_w + time_w, y + (h - g.unit) / 2, vl_w, g.unit + 2, TRUE);
+	MoveWindow(g.vol_bar, xt + wt - vb_w, y, vb_w, h, TRUE);
 	y += h + gap;
 
 	btn_h = g.unit * 2 - g.unit / 4;
@@ -1318,7 +1427,7 @@ static int min_client_width(void)
 		speed_box_width() + 5 * gap;
 	/* The seek row must also fit, with a seek bar still wide enough to use.
 	 * The button row is normally the wider, but that depends on the font. */
-	int seek_row = g.unit * 8 + time_width() + volume_label_width() + volume_bar_width();
+	int seek_row = g.art_size + gap + g.unit * 8 + time_width() + volume_label_width() + volume_bar_width();
 	return (buttons > seek_row ? buttons : seek_row) + margins;
 }
 
@@ -1572,6 +1681,16 @@ static void on_create(HWND hwnd)
 	create_fonts();
 	g.unit = font_height(g.font);
 	g.title_height = font_height(g.title_font) + 2;
+	/* The art square spans the title, artist and seek rows (see layout):
+	 * about 80 px at 100% scaling, and it grows with the text size. */
+	g.art_size = g.title_height + g.unit + 2 + g.unit / 2 + g.unit * 2;
+	/* The placeholder's note, at the size it is drawn so it stays sharp.
+	 * LoadImage picks the nearest of the icon's own sizes and scales it. */
+	g.art_icon = (HICON)LoadImageW(g.inst, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
+		g.art_size / 2, g.art_size / 2, 0);
+	/* Owner-drawn (draw_art), so the picture and the placeholder are
+	 * painted exactly; the text is only its name for screen readers. */
+	g.art = make_child(L"STATIC", L"Album art", SS_OWNERDRAW, 0, IDC_ART);
 
 	g.title = make_child(L"STATIC", L"", SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, 0, IDC_TITLE);
 	SendMessageW(g.title, WM_SETFONT, (WPARAM)g.title_font, FALSE);
@@ -1820,6 +1939,12 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		default: break;
 		}
 		break;
+	case WM_DRAWITEM:
+		if (((DRAWITEMSTRUCT *)lp)->hwndItem == g.art && g.art != NULL) {
+			draw_art((DRAWITEMSTRUCT *)lp);
+			return TRUE;
+		}
+		break;
 	case WM_CTLCOLORSTATIC:
 	case WM_CTLCOLORBTN: {
 		/*
@@ -1839,6 +1964,8 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 	case WM_SYSCOLORCHANGE:
 		create_button_icons();
 		create_menu_bitmaps();
+		/* The picture's margins are in the window color. */
+		refresh_art(1);
 		break;
 	case WM_DESTROY:
 		KillTimer(hwnd, TIMER_POSITION);
@@ -1963,6 +2090,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show)
 	DeleteObject(g.bold_font);
 	DeleteObject(g.title_font);
 	destroy_button_icons();
+	if (g.art_bmp != NULL)
+		DeleteObject(g.art_bmp);
+	if (g.art_icon != NULL)
+		DestroyIcon(g.art_icon);
 	/* After the window (and with it the menu) is gone, so no menu still
 	 * refers to the bitmaps. */
 	destroy_menu_bitmaps();

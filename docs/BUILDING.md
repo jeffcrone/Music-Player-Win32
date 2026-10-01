@@ -16,6 +16,7 @@ It takes about 10 minutes, most of it downloading the compiler.
 - [Changing the version number](#changing-the-version-number)
 - [Regenerating the icons](#regenerating-the-icons)
 - [Updating the dr_libs decoders](#updating-the-dr_libs-decoders)
+- [Updating stb_image](#updating-stb_image)
 - [Troubleshooting](#troubleshooting)
 
 ## Why this toolchain
@@ -81,7 +82,8 @@ cd WoW-Music-Player-Addon
 ```
 
 Everything the build needs is in the repository. The decoders are vendored
-in `third_party/dr_libs`, so nothing is downloaded during the build.
+in `third_party/dr_libs` and the album art decoder in `third_party/stb`, so
+nothing is downloaded during the build.
 
 ## 4. Build the 32-bit (Windows XP and later) version
 
@@ -242,6 +244,20 @@ tests. Pay attention to:
 The libraries' own file functions are compiled out (`DR_*_NO_STDIO`, in
 `src/dr_libs_config.h`) because they call C runtime functions XP's
 `msvcrt.dll` doesn't have. Keep it that way.
+
+## Updating stb_image
+
+`third_party/stb/` holds `stb_image.h` (v2.30) and its `LICENSE`, from
+commit `2c980bb59875b0d32144a71867fbdebb2f77cd20` of
+<https://github.com/nothings/stb>. To update, replace those two files with a
+newer commit's copies, then build **both** architectures and run the tests,
+watching `xp_compat_app` and the `image` suite.
+
+Its configuration is in `src/stb_image_config.h`, with the reasons in
+`src/stb_image_impl.c`: only the JPEG, PNG, BMP and GIF decoders are built
+(album art is decoded from whatever files the user opens, so less decoding
+code is less exposure), its file functions are compiled out, and pictures
+over 8192 pixels a side are refused before anything is allocated for them.
 
 ## Troubleshooting
 

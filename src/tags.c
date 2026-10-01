@@ -40,7 +40,43 @@ typedef struct {
 	/* Kept as text until the end, so that every source's value can be
 	 * checked with mp_tags_parse_track and a bad one passed over. */
 	wchar_t track[MP_TAG_MAX];
+
+	/* Album art, only looked for when want_picture is set. pic_front
+	 * records that the picture held is the front cover, which nothing
+	 * later in the same source can beat. */
+	int want_picture;
+	uint8_t *pic;
+	size_t pic_size;
+	int pic_front;
 } Slots;
+
+/* ID3 and FLAC number picture types the same way; 3 is the front cover. */
+#define PICTURE_FRONT_COVER 3
+
+/* Keeps a copy of a picture found in this source: the first one, unless a
+ * front cover turns up later. */
+static void offer_picture(Slots *slots, const uint8_t *img, size_t n, int type)
+{
+	uint8_t *copy;
+	if (!slots->want_picture || n == 0)
+		return;
+	if (slots->pic != NULL && (slots->pic_front || type != PICTURE_FRONT_COVER))
+		return;
+	copy = (uint8_t *)malloc(n);
+	if (copy == NULL)
+		return;
+	memcpy(copy, img, n);
+	free(slots->pic);
+	slots->pic = copy;
+	slots->pic_size = n;
+	slots->pic_front = type == PICTURE_FRONT_COVER;
+}
+
+/* Whether a source still has use for another picture. */
+static int wants_picture(const Slots *slots)
+{
+	return slots->want_picture && !(slots->pic != NULL && slots->pic_front);
+}
 
 /* First value wins: a slot that already holds something is left alone. That
  * matches the ID3 convention that repeated frames are a mistake and the
@@ -173,6 +209,88 @@ static wchar_t *id3_slot_for(Slots *slots, const char *id, int major)
 	return NULL;
 }
 
+/*
+ * Finds the image inside an APIC (v2.3/2.4) or PIC (v2.2) frame's content:
+ *   encoding byte
+ *   MIME type, Latin-1, NUL-terminated  (v2.2: a 3-letter format, "JPG")
+ *   picture type byte
+ *   description in the frame's encoding, NUL-terminated (two NUL bytes,
+ *     on a 2-byte boundary, for the UTF-16 encodings)
+ *   the image file's bytes, to the end of the frame
+ * Sets *type and *offset (where the image starts). Returns 0 if the frame
+ * is malformed or has no image bytes.
+ */
+static int apic_parse(const uint8_t *d, size_t n, int v22, int *type, size_t *offset)
+{
+	size_t p = 1;
+	uint8_t enc;
+	if (n < 2)
+		return 0;
+	enc = d[0];
+	if (v22) {
+		p += 3;
+	} else {
+		while (p < n && d[p] != 0)
+			p++;
+		p++; /* the NUL */
+	}
+	if (p >= n)
+		return 0;
+	*type = d[p++];
+	if (enc == 1 || enc == 2) {
+		/* UTF-16: a 16-bit NUL, so step two bytes at a time from the
+		 * description's start; a 0x00 high or low byte of a real
+		 * character must not end it. */
+		while (p + 1 < n && !(d[p] == 0 && d[p + 1] == 0))
+			p += 2;
+		p += 2;
+	} else {
+		while (p < n && d[p] != 0)
+			p++;
+		p++;
+	}
+	if (p >= n)
+		return 0;
+	*offset = p;
+	return 1;
+}
+
+static int is_picture_frame(const char *id, int major)
+{
+	return major == 2 ? memcmp(id, "PIC", 3) == 0 : memcmp(id, "APIC", 4) == 0;
+}
+
+/*
+ * How to read a frame's content, from its flags: how many bytes come
+ * before the content proper (*skip) and whether it is unsynchronized.
+ * Returns 0 for frames that cannot be read at all (compressed or
+ * encrypted): skipped rather than misread.
+ */
+static int frame_layout(int major, unsigned fflags, int tag_flags, size_t *skip, int *unsync)
+{
+	*skip = 0;
+	*unsync = 0;
+	if (major == 3) {
+		/* 0x0080 compression (zlib), 0x0040 encryption. */
+		if (fflags & 0x00C0)
+			return 0;
+		if (fflags & 0x0020)
+			*skip += 1; /* grouping identity byte */
+	} else if (major == 4) {
+		/* 0x0008 compression, 0x0004 encryption. */
+		if (fflags & 0x000C)
+			return 0;
+		if (fflags & 0x0040)
+			*skip += 1; /* grouping identity byte */
+		if (fflags & 0x0001)
+			*skip += 4; /* data length indicator */
+		/* In v2.4 the tag-level unsync flag means "every frame is
+		 * unsynchronized", so it applies per frame. */
+		*unsync = (fflags & 0x0002) || (tag_flags & 0x80);
+	}
+	return 1;
+}
+
 static int is_frame_id_char(uint8_t c)
 {
 	return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
@@ -225,26 +343,7 @@ static void id3_frames(const Body *body, size_t pos, int major, int tag_flags, S
 
 		slot = id3_slot_for(slots, id, major);
 		if (slot != NULL && slot[0] == 0 && fsize > 0) {
-			int usable = 1;
-			if (major == 3) {
-				/* 0x0080 compression (zlib), 0x0040 encryption: not worth
-				 * supporting for a title; skip rather than show garbage. */
-				if (fflags & 0x00C0)
-					usable = 0;
-				if (fflags & 0x0020)
-					skip += 1; /* grouping identity byte */
-			} else if (major == 4) {
-				/* 0x0008 compression, 0x0004 encryption. */
-				if (fflags & 0x000C)
-					usable = 0;
-				if (fflags & 0x0040)
-					skip += 1; /* grouping identity byte */
-				if (fflags & 0x0001)
-					skip += 4; /* data length indicator */
-				/* In v2.4 the tag-level unsync flag means "every frame is
-				 * unsynchronized", so it applies per frame. */
-				frame_unsync = (fflags & 0x0002) || (tag_flags & 0x80);
-			}
+			int usable = frame_layout(major, fflags, tag_flags, &skip, &frame_unsync);
 			n = fsize < FIELD_READ_MAX ? fsize : FIELD_READ_MAX;
 			if (usable && n > skip && body_read(body, pos, buf, n)) {
 				size_t len = n - skip;
@@ -253,6 +352,22 @@ static void id3_frames(const Body *body, size_t pos, int major, int tag_flags, S
 				id3_text(buf + skip, len, text);
 				offer(slot, text);
 			}
+		} else if (is_picture_frame(id, major) && wants_picture(slots) && fsize > 0 &&
+			fsize <= MP_PICTURE_MAX &&
+			frame_layout(major, fflags, tag_flags, &skip, &frame_unsync) && fsize > skip) {
+			/* A picture is read whole: unlike text, it cannot be cut
+			 * short. Only reached when a picture was asked for. */
+			uint8_t *frame = (uint8_t *)malloc(fsize);
+			if (frame != NULL && body_read(body, pos, frame, fsize)) {
+				uint8_t *d = frame + skip;
+				size_t len = fsize - skip, off = 0;
+				int type = 0;
+				if (frame_unsync)
+					len = remove_unsync(d, len);
+				if (apic_parse(d, len, major == 2, &type, &off))
+					offer_picture(slots, d + off, len - off, type);
+			}
+			free(frame);
 		}
 		pos += fsize;
 	}
@@ -432,6 +547,42 @@ static void vorbis_comments(const uint8_t *d, size_t n, Slots *slots)
 	}
 }
 
+/*
+ * A FLAC PICTURE block (all big-endian):
+ *   picture type (32), MIME type length (32) + MIME type, description
+ *   length (32) + description (UTF-8), width, height, color depth, number
+ *   of colors (32 each), data length (32) + the image file's bytes.
+ * Every length is checked against what is left before it is used.
+ */
+static void flac_picture(const uint8_t *d, size_t n, Slots *slots)
+{
+	size_t p;
+	uint32_t type, len;
+	if (n < 8)
+		return;
+	type = be32(d);
+	len = be32(d + 4);
+	p = 8;
+	if (len > n - p)
+		return;
+	p += len;
+	if (n - p < 4)
+		return;
+	len = be32(d + p);
+	p += 4;
+	if (len > n - p)
+		return;
+	p += len;
+	if (n - p < 20)
+		return;
+	p += 16;
+	len = be32(d + p);
+	p += 4;
+	if (len == 0 || len > n - p)
+		return;
+	offer_picture(slots, d + p, len, (int)type);
+}
+
 static void flac_parse(MpStream *s, int64_t off, Slots *slots)
 {
 	int blocks;
@@ -457,6 +608,15 @@ static void flac_parse(MpStream *s, int64_t off, Slots *slots)
 				if (mp_stream_seek(s, off, MP_SEEK_SET))
 					got = mp_stream_read(s, buf, want);
 				vorbis_comments(buf, got, slots);
+				free(buf);
+			}
+		} else if (type == 6 && wants_picture(slots) && len <= MP_PICTURE_MAX) {
+			uint8_t *buf = (uint8_t *)malloc(len ? len : 1);
+			if (buf != NULL) {
+				size_t got = 0;
+				if (mp_stream_seek(s, off, MP_SEEK_SET))
+					got = mp_stream_read(s, buf, len);
+				flac_picture(buf, got, slots);
 				free(buf);
 			}
 		}
@@ -548,24 +708,27 @@ static void wav_parse(MpStream *s, Slots *id3_slots, Slots *info_slots)
 
 /* ---- Entry points ------------------------------------------------------- */
 
-int mp_tags_read_stream(MpStream *s, MpTags *tags)
+/* How many tag sources there are; see parse_sources for their order. */
+#define SOURCES 4
+
+/*
+ * Parses every tag source in the stream into all[0..SOURCES), in
+ * precedence order: ID3v2 at the start, the format's own tags (FLAC
+ * Vorbis comment and pictures, or the WAV "id3 " chunk), WAV INFO, ID3v1.
+ * Returns NULL if out of memory. Free with free_sources.
+ */
+static Slots *parse_sources(MpStream *s, int want_picture)
 {
-	/* In precedence order; see tags.h. */
-	Slots *src;
 	Slots *all;
 	int64_t size, start = 0;
 	uint8_t magic[4];
-	int i, n = 4;
-
-	tags->title[0] = 0;
-	tags->artist[0] = 0;
-	tags->track = 0;
-	if (s == NULL)
-		return 0;
-	/* Slots are ~1.5 KB each; keep them off the (small, on XP) stack. */
-	all = (Slots *)calloc((size_t)n, sizeof(Slots));
+	int i;
+	/* Slots are ~2 KB each; keep them off the (small, on XP) stack. */
+	all = (Slots *)calloc(SOURCES, sizeof(Slots));
 	if (all == NULL)
-		return 0;
+		return NULL;
+	for (i = 0; i < SOURCES; i++)
+		all[i].want_picture = want_picture;
 	size = mp_stream_size(s);
 
 	/* Some tools stack several ID3v2 tags; the first one is the real one,
@@ -585,6 +748,33 @@ int mp_tags_read_stream(MpStream *s, MpTags *tags)
 		/* MP3 (or unknown): the only place ID3v1 is meaningful. */
 		id3v1_parse(s, &all[3]);
 	}
+	return all;
+}
+
+static void free_sources(Slots *all)
+{
+	int i;
+	if (all == NULL)
+		return;
+	for (i = 0; i < SOURCES; i++)
+		free(all[i].pic);
+	free(all);
+}
+
+int mp_tags_read_stream(MpStream *s, MpTags *tags)
+{
+	Slots *src;
+	Slots *all;
+	int i, n = SOURCES;
+
+	tags->title[0] = 0;
+	tags->artist[0] = 0;
+	tags->track = 0;
+	if (s == NULL)
+		return 0;
+	all = parse_sources(s, 0);
+	if (all == NULL)
+		return 0;
 
 	for (i = 0; i < n; i++) {
 		src = &all[i];
@@ -600,8 +790,53 @@ int mp_tags_read_stream(MpStream *s, MpTags *tags)
 	}
 	for (i = 0; i < n && tags->track == 0; i++)
 		tags->track = mp_tags_parse_track(all[i].track);
-	free(all);
+	free_sources(all);
 	return tags->title[0] != 0 || tags->artist[0] != 0 || tags->track != 0;
+}
+
+int mp_tags_read_picture_stream(MpStream *s, uint8_t **data, size_t *size)
+{
+	Slots *all;
+	int i, best = -1;
+	*data = NULL;
+	*size = 0;
+	if (s == NULL)
+		return 0;
+	all = parse_sources(s, 1);
+	if (all == NULL)
+		return 0;
+	/* The first source with a front cover; failing that, the first source
+	 * with any picture at all. */
+	for (i = 0; i < SOURCES && best < 0; i++) {
+		if (all[i].pic != NULL && all[i].pic_front)
+			best = i;
+	}
+	for (i = 0; i < SOURCES && best < 0; i++) {
+		if (all[i].pic != NULL)
+			best = i;
+	}
+	if (best >= 0) {
+		/* Handed over rather than copied; free_sources then skips it. */
+		*data = all[best].pic;
+		*size = all[best].pic_size;
+		all[best].pic = NULL;
+	}
+	free_sources(all);
+	return *data != NULL;
+}
+
+int mp_tags_read_picture_file(const wchar_t *path, uint8_t **data, size_t *size)
+{
+	MpStream *s;
+	int found;
+	*data = NULL;
+	*size = 0;
+	s = mp_stream_open_file(path, NULL);
+	if (s == NULL)
+		return 0;
+	found = mp_tags_read_picture_stream(s, data, size);
+	mp_stream_close(s);
+	return found;
 }
 
 int mp_tags_read_file(const wchar_t *path, MpTags *tags)

@@ -52,5 +52,6 @@
 #define IDC_VOLUME          2008
 #define IDC_SPEED_LABEL     2009
 #define IDC_SPEED           2010
+#define IDC_ART             2011
 
 #endif

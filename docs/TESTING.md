@@ -22,7 +22,7 @@ ctest --test-dir build-x86 --output-on-failure
 A passing run ends like this (about 3 seconds):
 
 ```
-100% tests passed, 0 tests failed out of 13
+100% tests passed, 0 tests failed out of 14
 ```
 
 `--output-on-failure` prints a failing test's output (what it expected and
@@ -31,7 +31,7 @@ build (`MP_BUILD_TESTS=ON`), so `cmake --build` builds them too.
 
 ## What is tested
 
-The unit tests are one program, `mp_tests.exe`, holding nine suites. CTest
+The unit tests are one program, `mp_tests.exe`, holding ten suites. CTest
 runs each suite as its own test, so a failure tells you which area broke.
 Test inputs (MP3, FLAC and WAV files, ID3 tags, playlists) are built byte by
 byte in memory by `tests/builders.c`, so every input is visible in the test
@@ -40,7 +40,7 @@ that uses it. There are no binary fixture files.
 | CTest name | Source | What it covers |
 | --- | --- | --- |
 | `text` | `tests/test_text.c` | UTF-8 decoding and validation (overlong forms, encoded surrogates, truncated sequences, values above U+10FFFF), Windows-1252 including its 0x80 to 0x9F range, UTF-16 in both byte orders with surrogate pairs and unpaired surrogates, UTF-8 encoding, truncation that never splits a character, trimming, ASCII-only case-insensitive comparison. |
-| `tags` | `tests/test_tags.c` | Title/artist/track number extraction. ID3v2.2/2.3/2.4 in all four text encodings, with or without BOMs. Extended headers. Tag-level and frame-level unsynchronization. The data length indicator and grouping bytes. Compressed and encrypted frames skipped. iTunes' non-syncsafe v2.4 sizes. Footers and stacked tags. Cover art skipped. ID3v1 and v1-vs-v2 precedence. Album artist fallback. FLAC Vorbis comments (case-insensitive keys, odd fields, corrupt counts, ID3 in front, padding blocks). WAV `LIST/INFO` (UTF-8 vs 1252, odd-length padding) and `id3 ` chunks. Track numbers from `TRCK`/`TRK`, ID3v1.1's track byte (and v1.0 comments that must not be mistaken for one), `TRACKNUMBER`/`TRACK` and `ITRK`, with a garbled value in one tag not hiding a good one in another, and the number parser itself ("07/12", "A1", overflow, fullwidth digits). Truncated, oversized and garbage structures, which must never crash or read out of bounds. |
+| `tags` | `tests/test_tags.c` | Title/artist/track number extraction, and embedded album art: ID3v2 APIC in v2.3 and v2.4 (with a UTF-16 description, and with a data length indicator plus unsynchronization) and v2.2 PIC, FLAC PICTURE blocks, WAV `id3 ` chunks; the front cover chosen over other pictures and across tag sources; compressed, truncated and unterminated picture frames refused safely. ID3v2.2/2.3/2.4 in all four text encodings, with or without BOMs. Extended headers. Tag-level and frame-level unsynchronization. The data length indicator and grouping bytes. Compressed and encrypted frames skipped. iTunes' non-syncsafe v2.4 sizes. Footers and stacked tags. Cover art skipped. ID3v1 and v1-vs-v2 precedence. Album artist fallback. FLAC Vorbis comments (case-insensitive keys, odd fields, corrupt counts, ID3 in front, padding blocks). WAV `LIST/INFO` (UTF-8 vs 1252, odd-length padding) and `id3 ` chunks. Track numbers from `TRCK`/`TRK`, ID3v1.1's track byte (and v1.0 comments that must not be mistaken for one), `TRACKNUMBER`/`TRACK` and `ITRK`, with a garbled value in one tag not hiding a good one in another, and the number parser itself ("07/12", "A1", overflow, fullwidth digits). Truncated, oversized and garbage structures, which must never crash or read out of bounds. |
 | `track` | `tests/test_track.c` | The display rules (title falls back to the file name, a missing artist stays empty, whitespace counts as missing), file-name extraction, and time formatting from `0:00` up to `1193:02:47`. |
 | `playlist` | `tests/test_playlist.c` | M3U parsing (directives, blank lines, LF/CRLF/CR, padding). Relative, rooted, absolute, UNC and forward-slash paths. `file://` URLs with %-escapes, UNC hosts and the legacy `C\|` form. Stream URLs skipped. UTF-8/UTF-16/ANSI detection. PLS numbering and ordering. Previous/Next stepping and wrap-around. Removing tracks while one is playing. Sorting by track, title, artist and file name, both directions: language-aware and case-insensitive, blanks last either way, stable (including the track-then-artist use of that), the playing track followed, the old-to-new index map, and a 1,000-entry list. Moving a selection as a block to any position (top, end, middle, from both sides, no-ops, bad arguments refused). Move Up/Down: passing unselected neighbors, blocks stuck at either end, selection flags following the entries. `.m3u8` saving with relative paths and a round trip back through the parser. |
 | `decoder` | `tests/test_decoder.c` | Format detection by content (and by extension only as a fallback). Exact sample-for-sample decoding of WAV (8/16/24-bit, float, 6-channel downmix) and FLAC (stereo and mono, multiple frames, seeking), with MP3 checked as known silence (length, seeking, tags at both ends). The workaround for dr_flac's ID3-in-front bug. Error messages for missing, empty, corrupt and unsupported files. |
@@ -48,6 +48,7 @@ that uses it. There are no binary fixture files.
 | `volume` | `tests/test_volume.c` | The software volume. The slider-to-gain curve (exact at 0% and 100%, strictly rising, clamped out of range), and sample scaling: bit-exact at full volume, silence at zero, symmetric rounding for negative samples, no overflow at the 16-bit extremes, and only the given samples touched. Needs no sound device, so it runs on CI too. |
 | `glyph` | `tests/test_glyph.c` | The playback buttons' symbols, pixel by pixel. Stop and Pause exact at 16 px. The color applied to every visible pixel. Margins kept at every size. Previous an exact mirror of Next, and every symbol symmetric top to bottom, from 1 px to 100 px. Areas that scale with the size. Anti-aliased edges. Bad arguments refused without writing anything. The conversion to premultiplied alpha for the menu's bitmaps: rounding, no channel above its alpha, every alpha level. |
 | `stretch` | `tests/test_stretch.c` | The time stretcher, on synthetic tones at every speed from 0.25x to 4x. The output's length scales with 1 / speed. Low (110 Hz), middle and high notes keep their pitch within 1% and their loudness within 10% (resampling would have moved the pitch by the speed factor, and misaligned slices would lose loudness). A silent channel stays exactly silent, and silence stays silence. Full-scale input never wraps to the opposite sign. The same input gives identical output whatever the chunk sizes, including a source that trickles 7 frames at a time. Resets, empty and very short input, clamped speeds, bad arguments. Needs no sound device. |
+| `image` | `tests/test_image.c` | Album art. Scaling into the thumbnail: exact solid colors when shrinking and enlarging, true averaging (a checkerboard becomes gray), brightness kept at awkward ratios, wide and tall pictures centered with background bands, transparency blended onto the background without color bleeding from transparent pixels. Decoding real PNG (with transparency), JPEG, GIF and hand-built BMP bytes, and refusing garbage, truncated, oversized and 10000 x 10000 pictures. Finding art in a track's folder: every supported name, their order, any capitalization, Windows Media Player's files, empty files skipped, and embedded art taking precedence. |
 | `xpcheck_self_test`, `xp_compat_app`, `xp_compat_tests` | `tests/xpcheck.c` | The Windows XP check, on both `MusicPlayer.exe` and `mp_tests.exe`. Only in XP-compatible (msvcrt) builds. [Details below.](#the-windows-xp-check) |
 | `icons` | `tools/test_make_icons.py` | The icon generator, and that `Music_Icons/` matches it. Only if CMake finds Python. [Details below.](#the-icon-tests) |
 
@@ -96,7 +97,7 @@ Windows Audio service stopped) can't run it. The suite then reports
 **skipped** rather than failed:
 
 ```
-6/13 Test  #6: player ...........................***Skipped   0.01 sec
+6/14 Test  #6: player ...........................***Skipped   0.01 sec
 ```
 
 If it skips on your own PC, check that a playback device is enabled in
@@ -258,13 +259,18 @@ characters in its tags.
     3x, from both the drop-down and Playback > Speed (the menu's check mark
     follows the drop-down). Change the speed while paused: it stays paused
     in the same place. The speed carries on to the next track.
-18. Tab through the controls. Ctrl+P, Ctrl+S, Ctrl+B, Ctrl+F and the media keys
+18. Play a track with album art inside the file, one with a `cover.jpg` (or
+    `folder.jpg`) in its folder, and one with neither: the first two show
+    their pictures to the left of the title, the third a music note. A wide
+    or tall picture is centered, not stretched. The picture changes as
+    tracks change, and stays put while you reorder the list.
+19. Tab through the controls. Ctrl+P, Ctrl+S, Ctrl+B, Ctrl+F and the media keys
     work while the window is active.
-19. Play music with World of Warcraft (or any game) running in windowed
+20. Play music with World of Warcraft (or any game) running in windowed
     mode. Alt+Tab between them. Turning the player's volume slider down
     must not change the game's volume (check this on XP too, where a
     shared device volume would be the telltale bug).
-20. At 150% display scaling (Settings > Display > Scale), the window is
+21. At 150% display scaling (Settings > Display > Scale), the window is
     sharp and proportioned, not blurry or cramped, and so are the button
     symbols.
 
