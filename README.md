@@ -30,7 +30,7 @@ Windows program on whatever version of Windows it runs on.
    Use the **x86** build unless you specifically want 64-bit: it runs on
    every Windows version, 32- or 64-bit.
 2. Unzip it anywhere and run `MusicPlayer.exe`.
-3. **File > Open Files...** (Ctrl+O), or drag music files onto the window.
+3. **File > Add Files...** (Ctrl+O), or drag music files onto the window.
 
 Details, keyboard shortcuts and troubleshooting: **[docs/RUNNING.md](docs/RUNNING.md)**.
 

@@ -44,12 +44,11 @@ is new and not code-signed. Click **More info > Run anyway**.
 
 ## Playing music
 
-There are four ways to get music in:
+There are three ways to get music in:
 
 | How | What happens |
 | --- | --- |
-| **File > Open Files...** (Ctrl+O) | Pick one or more files (Ctrl+click, Shift+click or Ctrl+A in the dialog). **Replaces** the playlist and starts playing the first one. |
-| **File > Add Files...** (Ctrl+Shift+O) or the **Add Files...** button | **Appends** to the playlist. Nothing is interrupted, but if nothing was loaded yet, the first added file starts. |
+| **File > Add Files...** (Ctrl+O) | Pick one or more files (Ctrl+click, Shift+click or Ctrl+A in the dialog). They're **added to the end** of the playlist. Nothing is interrupted, but if nothing was loaded yet, the first added file starts. To start over with only the new files, use **File > Clear Playlist** first. |
 | **Drag and drop** files onto the window | Appends. Audio files and playlist files can be mixed. Starts playing if nothing was loaded. |
 | **Command line**: `MusicPlayer.exe song.mp3 list.m3u8` | Same as dropping those files. Dropping files onto `MusicPlayer.exe` in Explorer works the same way. |
 
@@ -58,7 +57,9 @@ extension. They're accepted if their content really is MP3, FLAC or WAV.
 
 **Double-click** a track in the list (or select it and press **Enter**) to
 play it. Select tracks and press **Delete** to remove them from the playlist.
-The files on disk are not touched. **File > Clear Playlist** empties the list.
+The files on disk are not touched. **File > Clear Playlist** empties the list,
+after asking whether you're sure (No is the default answer, so a stray Enter
+does nothing). It's grayed out when the list is already empty.
 
 ### Sorting and reordering
 
@@ -85,9 +86,13 @@ The files on disk are not touched. **File > Clear Playlist** empties the list.
 
 ## Playlists
 
-**Opening:** **File > Open Playlist...** (Ctrl+L), the **Open Playlist...**
-button, or drag a playlist onto the window. Opening replaces the current
-playlist and starts the first track. Dropping appends.
+**Opening:** **File > Open Playlist...** (Ctrl+L), or drag a playlist onto
+the window. Opening replaces the current playlist and starts the first
+track. If there are tracks in the list already, it first asks whether to
+replace them (No is the default answer); save the current playlist first if
+you want to keep it. A playlist file that can't be read, or that lists no
+tracks, leaves the current list as it was. Dropping a playlist appends its
+tracks instead, without asking.
 
 Supported:
 
@@ -168,9 +173,9 @@ The playback shortcuts are the same as Windows Media Player's.
 | Volume up / down | drag the volume slider, or click it | Playback > Volume Up / Volume Down | F10 / F9 (5% a press), or Tab to the volume slider, then arrow keys (5%) or Page Up/Down (20%) |
 | Mute / unmute | | Playback > Mute | F8 |
 | Playback speed | the **Speed** drop-down | Playback > Speed | Tab to the drop-down, then the arrow keys |
-| Open files (replace) | | File > Open Files... | Ctrl+O |
-| Add files | **Add Files...** | File > Add Files... | Ctrl+Shift+O |
-| Open playlist | **Open Playlist...** | File > Open Playlist... | Ctrl+L |
+| Add files to the playlist | | File > Add Files... | Ctrl+O (Ctrl+Shift+O also works) |
+| Open playlist (replaces the list, asks first) | | File > Open Playlist... | Ctrl+L |
+| Clear the playlist (asks first) | | File > Clear Playlist | |
 | Save playlist | | File > Save Playlist As... | Ctrl+Shift+S |
 | Play the selected track | double-click it | | Enter |
 | Remove selected tracks | | File > Remove Selected Tracks | Delete |

@@ -9,7 +9,6 @@
 #define IDR_ACCEL           101
 
 /* Menu commands (also used by the matching buttons). */
-#define IDM_OPEN_FILES      1001
 #define IDM_ADD_FILES       1002
 #define IDM_OPEN_PLAYLIST   1003
 #define IDM_SAVE_PLAYLIST   1004
@@ -49,8 +48,6 @@
 #define IDC_BTN_PLAY        2102
 #define IDC_BTN_STOP        2103
 #define IDC_BTN_NEXT        2104
-#define IDC_BTN_ADD         2105
-#define IDC_BTN_PLAYLIST    2106
 #define IDC_VOLUME_LABEL    2007
 #define IDC_VOLUME          2008
 #define IDC_SPEED_LABEL     2009

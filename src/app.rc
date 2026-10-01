@@ -18,16 +18,16 @@ IDR_MAINMENU MENU
 BEGIN
 	POPUP "&File"
 	BEGIN
-		MENUITEM "&Open Files...\tCtrl+O", IDM_OPEN_FILES
-		MENUITEM "&Add Files...\tCtrl+Shift+O", IDM_ADD_FILES
+		MENUITEM "&Add Files...\tCtrl+O", IDM_ADD_FILES
 		MENUITEM SEPARATOR
 		MENUITEM "Open &Playlist...\tCtrl+L", IDM_OPEN_PLAYLIST
 		MENUITEM "&Save Playlist As...\tCtrl+Shift+S", IDM_SAVE_PLAYLIST
 		MENUITEM SEPARATOR
 		MENUITEM "&Remove Selected Tracks\tDel", IDM_REMOVE_SELECTED
+		MENUITEM "&Clear Playlist", IDM_CLEAR_PLAYLIST
+		MENUITEM SEPARATOR
 		MENUITEM "Move &Up\tAlt+Up", IDM_MOVE_UP
 		MENUITEM "Move &Down\tAlt+Down", IDM_MOVE_DOWN
-		MENUITEM "&Clear Playlist", IDM_CLEAR_PLAYLIST
 		MENUITEM SEPARATOR
 		MENUITEM "E&xit", IDM_EXIT
 	END
@@ -68,7 +68,9 @@ END
  * them to change the Windows volume, not this program's. */
 IDR_ACCEL ACCELERATORS
 BEGIN
-	"O", IDM_OPEN_FILES, VIRTKEY, CONTROL
+	/* Ctrl+O, the usual "open" key, adds files. Ctrl+Shift+O was Add Files'
+	 * own shortcut when there was a separate Open Files; it still works. */
+	"O", IDM_ADD_FILES, VIRTKEY, CONTROL
 	"O", IDM_ADD_FILES, VIRTKEY, CONTROL, SHIFT
 	"L", IDM_OPEN_PLAYLIST, VIRTKEY, CONTROL
 	"S", IDM_SAVE_PLAYLIST, VIRTKEY, CONTROL, SHIFT

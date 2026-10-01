@@ -207,7 +207,7 @@ characters in its tags.
 
 1. Start `MusicPlayer.exe`. The window opens with "No tracks loaded", the
    note icon shows in the title bar and taskbar, and nothing is playing.
-2. **File > Open Files...**, select several files. The first plays. Title and
+2. **File > Add Files...** (Ctrl+O), select several files. The first plays. Title and
    artist show at the top, the time counts up, and the button says **Pause**.
 3. A file without tags shows its **file name** as the title and **no artist**.
 4. **Pause**: the sound stops and the time holds. **Play**: it resumes from
@@ -218,8 +218,12 @@ characters in its tags.
    the list it stops with "End of playlist". Turn on **Playback > Repeat
    Playlist** and check that it starts over instead.
 8. **Stop**: the time goes back to 0:00.
-9. **File > Save Playlist As...**, then **File > Clear Playlist**, then
-   **File > Open Playlist...** with the saved file: the same tracks return.
+9. **File > Save Playlist As...**, then **File > Clear Playlist**: it asks
+   first, and **No** (the default) keeps the list. Clear it with **Yes**,
+   then **File > Open Playlist...** with the saved file: the same tracks
+   return. Open the playlist again while tracks are in the list: it asks
+   before replacing them, and **No** keeps them. **File > Add Files...**
+   adds to the end of the list and doesn't interrupt what's playing.
 10. Drag files and a playlist from Explorer onto the window.
 11. Select two tracks and press **Delete**. Delete the playing track: playback
     stops cleanly.

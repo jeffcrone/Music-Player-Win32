@@ -66,7 +66,7 @@ typedef struct {
 	HWND title, artist, seek, time, list, status;
 	HWND vol_label, vol_bar;
 	HWND speed_label, speed_box;
-	HWND btn_prev, btn_play, btn_stop, btn_next, btn_add, btn_playlist;
+	HWND btn_prev, btn_play, btn_stop, btn_next;
 	HFONT font, title_font, bold_font;
 	HICON icons[MP_GLYPH_COUNT]; /* the playback buttons' symbols */
 	int icon_size;
@@ -190,21 +190,31 @@ static int add_track(const wchar_t *path)
 
 /* Appends every track listed in a playlist file. Returns the number added,
  * or -1 if the file could not be read. */
-static int add_playlist_file(const wchar_t *path)
+/* Reads a playlist file's entries into *out (which starts empty). Returns 0
+ * if the file could not be read. Nothing is added to the playlist, so the
+ * caller can see what is in the file before deciding what to do. */
+static int read_playlist_paths(const wchar_t *path, MpPathList *out)
 {
 	uint8_t *data;
-	size_t size, i;
+	size_t size;
+	memset(out, 0, sizeof(*out));
+	if (!mp_file_read_all(path, PLAYLIST_FILE_MAX, &data, &size))
+		return 0;
+	mp_playlist_parse(data, size, path, out);
+	free(data);
+	return 1;
+}
+
+static int add_playlist_file(const wchar_t *path)
+{
+	size_t i;
 	MpPathList paths;
 	int added = 0;
-	if (!mp_file_read_all(path, PLAYLIST_FILE_MAX, &data, &size))
+	if (!read_playlist_paths(path, &paths))
 		return -1;
-	memset(&paths, 0, sizeof(paths));
-	if (mp_playlist_parse(data, size, path, &paths)) {
-		for (i = 0; i < paths.count; i++)
-			added += add_track(paths.paths[i]);
-	}
+	for (i = 0; i < paths.count; i++)
+		added += add_track(paths.paths[i]);
 	mp_pathlist_free(&paths);
-	free(data);
 	return added;
 }
 
@@ -279,7 +289,7 @@ static void update_now_playing(void)
 		ListView_EnsureVisible(g.list, (int)g.pl.current, FALSE);
 	} else {
 		SetWindowTextW(g.title, g.pl.count ? L"Nothing playing" : L"No tracks loaded");
-		SetWindowTextW(g.artist, g.pl.count ? L"" : L"Use File > Open Files, or drop music files here.");
+		SetWindowTextW(g.artist, g.pl.count ? L"" : L"Use File > Add Files or File > Open Playlist, or drop music files here.");
 		SetWindowTextW(g.hwnd, APP_NAME);
 	}
 	/* The current row is drawn in bold (NM_CUSTOMDRAW). */
@@ -750,6 +760,7 @@ static void update_edit_menu(void)
 	EnableMenuItem(menu, IDM_MOVE_UP, MF_BYCOMMAND | (can_up ? MF_ENABLED : MF_GRAYED));
 	EnableMenuItem(menu, IDM_MOVE_DOWN, MF_BYCOMMAND | (can_down ? MF_ENABLED : MF_GRAYED));
 	EnableMenuItem(menu, IDM_REMOVE_SELECTED, MF_BYCOMMAND | (n > 0 ? MF_ENABLED : MF_GRAYED));
+	EnableMenuItem(menu, IDM_CLEAR_PLAYLIST, MF_BYCOMMAND | (g.pl.count > 0 ? MF_ENABLED : MF_GRAYED));
 }
 
 /* Called on LVN_BEGINDRAG: the list has seen the mouse go down on a row and
@@ -977,40 +988,100 @@ static size_t add_paths(wchar_t **paths, size_t count)
 	return g.pl.count > first ? first : MP_NONE;
 }
 
-static void cmd_open_files(int replace)
+/* File > Add Files: adds the chosen files to the end of the playlist.
+ * Whatever is playing carries on; if nothing is, the first new track
+ * starts. (There used to be an Open Files that replaced the list instead;
+ * Clear Playlist, or Open Playlist, is now the way to start over.) */
+static void cmd_open_files(void)
 {
 	MpPathList paths;
 	size_t first;
 	memset(&paths, 0, sizeof(paths));
 	if (!pick_audio_files(&paths))
 		return;
-	if (replace)
-		clear_playlist();
 	first = add_paths(paths.paths, paths.count);
 	mp_pathlist_free(&paths);
-	/* Open plays right away; Add only plays if nothing is loaded yet. */
-	if (first != MP_NONE && (replace || mp_player_state(g.player) == MP_PLAYER_EMPTY))
+	if (first != MP_NONE && mp_player_state(g.player) == MP_PLAYER_EMPTY)
 		play_from(first, 1, 0);
 	else
 		update_now_playing();
 }
 
-static void cmd_open_playlist(void)
+/* File > Clear Playlist, after asking: it cannot be undone, and it stops
+ * whatever is playing. No is the default button, so an Enter pressed by
+ * habit does not wipe the list. */
+static void cmd_clear_playlist(void)
 {
-	wchar_t path[MAX_PATH * 2];
-	int added;
-	if (!pick_playlist_file(path, MAX_PATH * 2, 0))
+	wchar_t msg[256];
+	/* The menu item is grayed when the list is empty (update_edit_menu),
+	 * but an empty list has nothing to ask about either way. */
+	if (g.pl.count == 0)
+		return;
+	if (g.pl.count == 1)
+		mp_wcopy(msg, 256, L"Remove the track from the playlist?");
+	else
+		wsprintfW(msg, L"Remove all %d tracks from the playlist?", (int)g.pl.count);
+	wcat(msg, 256, L"\n\nThe music files themselves are not deleted.");
+	if (MessageBoxW(g.hwnd, msg, L"Clear Playlist", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES)
 		return;
 	clear_playlist();
-	added = add_playlist_file(path);
-	refresh_list();
-	if (added < 0) {
+}
+
+/*
+ * File > Open Playlist: replaces the playlist with the one in the chosen
+ * file, asking first if that would throw away tracks already in the list.
+ *
+ * The file is read before anything else happens, so a playlist that cannot
+ * be read, or lists no tracks, leaves the current list exactly as it was
+ * (and is not worth a question). The question comes after the file is
+ * picked, not before, so canceling the file dialog never involves it.
+ */
+static void cmd_open_playlist(void)
+{
+	wchar_t path[MAX_PATH * 2], msg[MSG_MAX];
+	MpPathList paths;
+	size_t i;
+	if (!pick_playlist_file(path, MAX_PATH * 2, 0))
+		return;
+	if (!read_playlist_paths(path, &paths)) {
 		MessageBoxW(g.hwnd, L"The playlist file could not be read.", APP_NAME, MB_OK | MB_ICONERROR);
-	} else if (added == 0) {
-		set_status(L"The playlist does not list any tracks.");
-	} else {
-		play_from(0, 1, 0);
+		return;
 	}
+	if (paths.count == 0) {
+		mp_pathlist_free(&paths);
+		set_status(L"The playlist does not list any tracks.");
+		return;
+	}
+	if (g.pl.count > 0) {
+		mp_wcopy(msg, MSG_MAX, L"Open \"");
+		wcat(msg, MSG_MAX, mp_path_basename(path));
+		wcat(msg, MSG_MAX, L"\"?\n\n");
+		if (g.pl.count == 1) {
+			wcat(msg, MSG_MAX, L"It replaces the track in the current playlist.");
+		} else {
+			wchar_t n[96];
+			wsprintfW(n, L"It replaces all %d tracks in the current playlist.", (int)g.pl.count);
+			wcat(msg, MSG_MAX, n);
+		}
+		wcat(msg, MSG_MAX, L" To keep them, save the current playlist first (File > Save Playlist As). "
+			L"The music files themselves are not deleted either way.");
+		/* No is the default, as for Clear Playlist. */
+		if (MessageBoxW(g.hwnd, msg, L"Open Playlist", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) {
+			mp_pathlist_free(&paths);
+			return;
+		}
+	}
+	clear_playlist();
+	{
+		HCURSOR old = SetCursor(LoadCursor(NULL, IDC_WAIT));
+		for (i = 0; i < paths.count; i++)
+			add_track(paths.paths[i]);
+		SetCursor(old);
+	}
+	mp_pathlist_free(&paths);
+	refresh_list();
+	if (g.pl.count > 0)
+		play_from(0, 1, 0);
 }
 
 static void cmd_save_playlist(void)
@@ -1074,16 +1145,13 @@ static void cmd_about(void)
 static void on_command(int id)
 {
 	switch (id) {
-	case IDM_OPEN_FILES: cmd_open_files(1); break;
-	case IDM_ADD_FILES:
-	case IDC_BTN_ADD: cmd_open_files(0); break;
-	case IDM_OPEN_PLAYLIST:
-	case IDC_BTN_PLAYLIST: cmd_open_playlist(); break;
+	case IDM_ADD_FILES: cmd_open_files(); break;
+	case IDM_OPEN_PLAYLIST: cmd_open_playlist(); break;
 	case IDM_SAVE_PLAYLIST: cmd_save_playlist(); break;
 	case IDM_REMOVE_SELECTED: cmd_remove_selected(); break;
 	case IDM_MOVE_UP: cmd_move_selected(-1); break;
 	case IDM_MOVE_DOWN: cmd_move_selected(1); break;
-	case IDM_CLEAR_PLAYLIST: clear_playlist(); break;
+	case IDM_CLEAR_PLAYLIST: cmd_clear_playlist(); break;
 	case IDM_EXIT: DestroyWindow(g.hwnd); break;
 	case IDM_PLAY_PAUSE:
 	case IDC_BTN_PLAY: play_pause(); break;
@@ -1185,7 +1253,6 @@ static void layout(void)
 	int x, y, w, h, status_h, btn_h, time_w, vl_w, vb_w, seek_w;
 	int wp = icon_button_width(L"Previous"), wplay = icon_button_width(L"Pause");
 	int ws = icon_button_width(L"Stop"), wn = icon_button_width(L"Next");
-	int wa = button_width(L"Add Files..."), wl = button_width(L"Open Playlist...");
 
 	GetClientRect(g.hwnd, &rc);
 	/* The status bar positions itself on WM_SIZE; we only need its height. */
@@ -1236,8 +1303,6 @@ static void layout(void)
 		box_h = cr.bottom - cr.top;
 		MoveWindow(g.speed_box, sx, y + (btn_h - box_h) / 2, speed_box_width(), g.unit * 16, TRUE);
 	}
-	MoveWindow(g.btn_playlist, x + w - wl, y, wl, btn_h, TRUE);
-	MoveWindow(g.btn_add, x + w - wl - gap - wa, y, wa, btn_h, TRUE);
 	y += btn_h + gap;
 
 	h = rc.bottom - status_h - m - y;
@@ -1247,9 +1312,10 @@ static void layout(void)
 static int min_client_width(void)
 {
 	int gap = g.unit / 2, margins = g.unit * 4 / 3;
+	/* Previous, Play, Stop, Next, and the speed control two gaps after. */
 	int buttons = icon_button_width(L"Previous") + icon_button_width(L"Pause") +
-		icon_button_width(L"Stop") + icon_button_width(L"Next") + button_width(L"Add Files...") +
-		button_width(L"Open Playlist...") + speed_label_width() + speed_box_width() + 7 * gap + g.unit * 2;
+		icon_button_width(L"Stop") + icon_button_width(L"Next") + speed_label_width() +
+		speed_box_width() + 5 * gap;
 	/* The seek row must also fit, with a seek bar still wide enough to use.
 	 * The button row is normally the wider, but that depends on the font. */
 	int seek_row = g.unit * 8 + time_width() + volume_label_width() + volume_bar_width();
@@ -1529,9 +1595,9 @@ static void on_create(HWND hwnd)
 	g.btn_play = make_child(L"BUTTON", L"Play", BS_PUSHBUTTON | WS_TABSTOP, 0, IDC_BTN_PLAY);
 	g.btn_stop = make_child(L"BUTTON", L"Stop", BS_PUSHBUTTON | WS_TABSTOP, 0, IDC_BTN_STOP);
 	g.btn_next = make_child(L"BUTTON", L"Next", BS_PUSHBUTTON | WS_TABSTOP, 0, IDC_BTN_NEXT);
-	/* Created here, between Next and Add Files, so Tab reaches it in the
-	 * order it appears; the label first, so screen readers name the box
-	 * after it ("Speed"). */
+	/* Created here, right after Next, so Tab reaches it in the order it
+	 * appears; the label first, so screen readers name the box after it
+	 * ("Speed"). */
 	g.speed_label = make_child(L"STATIC", L"Speed:", SS_LEFT | SS_NOPREFIX, 0, IDC_SPEED_LABEL);
 	g.speed_box = make_child(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 0, IDC_SPEED);
 	{
@@ -1539,8 +1605,6 @@ static void on_create(HWND hwnd)
 		for (i = 0; i < SPEED_COUNT; i++)
 			SendMessageW(g.speed_box, CB_ADDSTRING, 0, (LPARAM)speed_names[i]);
 	}
-	g.btn_add = make_child(L"BUTTON", L"Add Files...", BS_PUSHBUTTON | WS_TABSTOP, 0, IDC_BTN_ADD);
-	g.btn_playlist = make_child(L"BUTTON", L"Open Playlist...", BS_PUSHBUTTON | WS_TABSTOP, 0, IDC_BTN_PLAYLIST);
 	create_button_icons();
 	/* The class's menu is already attached by the time WM_CREATE arrives. */
 	create_menu_bitmaps();
